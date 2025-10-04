@@ -506,7 +506,7 @@ fn preprocess_data(data: &[CalorieData]) -> Result<(Array2<f32>, Array1<f32>, Fe
         ],
     };
     
-    println!("📊 Original data ranges:");
+    println!("Original data ranges:");
     for j in 0..n_features {
         let column = features.column(j);
         let min_val = column.iter().fold(f32::INFINITY, |a, &b| a.min(b));
