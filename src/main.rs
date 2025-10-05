@@ -4,9 +4,10 @@ use csv::Reader;
 use serde::Deserialize;
 use ndarray::{Array1, Array2};
 use rand::Rng;
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Clone)]
-struct CalorieData {
+struct DailyCalorieData {
     #[serde(rename = "ID")]
     id: Option<f32>,
     #[serde(rename = "Age")]
@@ -18,118 +19,69 @@ struct CalorieData {
     #[serde(rename = "Sleep_Hours")]
     sleep_hours: f32,
     #[serde(rename = "Height_m")]
-    height: f32,
+    height_m: f32,
     #[serde(rename = "Required_Daily_Calories")]
-    calories: f32,
-    
-    // Computed fields (not in CSV)
-    #[serde(skip)]
-    weight: f32,
-    #[serde(skip)]
-    duration: f32,
-    #[serde(skip)]
-    heart_rate: f32,
-    #[serde(skip)]
-    body_temp: f32,
+    required_daily_calories: f32,
 }
 
-impl CalorieData {
-    fn compute_missing_fields(&mut self) {
-        self.weight = if self.gender.to_lowercase() == "male" {
-            self.height * 100.0 * 0.45 - 10.0
-        } else {
-            self.height * 100.0 * 0.4 - 5.0
-        };
-        
-        self.duration = 30.0;
-        self.heart_rate = if self.gender.to_lowercase() == "male" { 
-            190.0 - self.age 
-        } else { 
-            185.0 - self.age 
-        };
-        self.body_temp = 37.0;
-        self.height *= 100.0;
-    }
-}
-
-#[derive(Clone)]
-struct FeatureStats {
-    min_vals: Array1<f32>,
-    max_vals: Array1<f32>,
-    feature_names: Vec<String>,
-}
-
-// Neural Network Implementation
-struct NeuralNetwork {
-    // Layer 1: Input to Hidden
+// Neural Network for predicting daily calorie requirements
+struct DailyCaloriePredictor {
+    // Single hidden layer network
     weights1: Array2<f32>,
     biases1: Array1<f32>,
-    
-    // Layer 2: Hidden to Hidden
     weights2: Array2<f32>,
     biases2: Array1<f32>,
     
-    // Layer 3: Hidden to Output
-    weights3: Array2<f32>,
-    biases3: Array1<f32>,
+    // Normalization parameters
+    input_mins: Array1<f32>,
+    input_maxs: Array1<f32>,
+    target_min: f32,
+    target_max: f32,
     
-    feature_stats: FeatureStats,
+    // Encoders for categorical data
+    working_type_encoder: HashMap<String, usize>,
+    
     input_size: usize,
-    hidden_size1: usize,
-    hidden_size2: usize,
+    hidden_size: usize,
 }
 
-impl NeuralNetwork {
-    fn new(input_size: usize, hidden_size1: usize, hidden_size2: usize) -> Self {
+impl DailyCaloriePredictor {
+    fn new(input_size: usize, working_type_encoder: HashMap<String, usize>) -> Self {
         let mut rng = rand::thread_rng();
+        let hidden_size = 16; // Increased for more complex patterns
         
-        // Xavier initialization for weights
-        let xavier_1 = (2.0 / (input_size + hidden_size1) as f32).sqrt();
-        let xavier_2 = (2.0 / (hidden_size1 + hidden_size2) as f32).sqrt();
-        let xavier_3 = (2.0 / (hidden_size2 + 1) as f32).sqrt();
+        // Xavier initialization
+        let xavier_1 = (2.0 / (input_size + hidden_size) as f32).sqrt();
+        let xavier_2 = (2.0 / (hidden_size + 1) as f32).sqrt();
         
-        let mut weights1 = Array2::<f32>::zeros((input_size, hidden_size1));
-        let mut weights2 = Array2::<f32>::zeros((hidden_size1, hidden_size2));
-        let mut weights3 = Array2::<f32>::zeros((hidden_size2, 1));
+        let mut weights1 = Array2::<f32>::zeros((input_size, hidden_size));
+        let mut weights2 = Array2::<f32>::zeros((hidden_size, 1));
         
-        // Initialize weights with Xavier initialization
+        // Initialize weights
         for i in 0..input_size {
-            for j in 0..hidden_size1 {
+            for j in 0..hidden_size {
                 weights1[[i, j]] = rng.gen_range(-xavier_1..xavier_1);
             }
         }
         
-        for i in 0..hidden_size1 {
-            for j in 0..hidden_size2 {
-                weights2[[i, j]] = rng.gen_range(-xavier_2..xavier_2);
-            }
-        }
-        
-        for i in 0..hidden_size2 {
-            weights3[[i, 0]] = rng.gen_range(-xavier_3..xavier_3);
+        for i in 0..hidden_size {
+            weights2[[i, 0]] = rng.gen_range(-xavier_2..xavier_2);
         }
         
         Self {
             weights1,
-            biases1: Array1::<f32>::zeros(hidden_size1),
+            biases1: Array1::<f32>::zeros(hidden_size),
             weights2,
-            biases2: Array1::<f32>::zeros(hidden_size2),
-            weights3,
-            biases3: Array1::<f32>::zeros(1),
-            feature_stats: FeatureStats {
-                min_vals: Array1::<f32>::zeros(input_size),
-                max_vals: Array1::<f32>::zeros(input_size),
-                feature_names: vec![
-                    "Age".to_string(),
-                    "Gender (M=1, F=0)".to_string(), 
-                    "Activity Factor".to_string(),
-                    "Sleep Hours".to_string(),
-                    "Height (cm)".to_string(),
-                ],
-            },
+            biases2: Array1::<f32>::zeros(1),
+            
+            input_mins: Array1::<f32>::zeros(input_size),
+            input_maxs: Array1::<f32>::ones(input_size),
+            target_min: 1000.0,
+            target_max: 4000.0,
+            
+            working_type_encoder,
             input_size,
-            hidden_size1,
-            hidden_size2,
+            hidden_size,
         }
     }
     
@@ -138,426 +90,266 @@ impl NeuralNetwork {
         x.max(0.0)
     }
     
-    // ReLU derivative
     fn relu_derivative(x: f32) -> f32 {
         if x > 0.0 { 1.0 } else { 0.0 }
     }
     
-    // Forward pass
-    fn forward(&self, input: &Array1<f32>) -> (Array1<f32>, Array1<f32>, Array1<f32>, f32) {
-        // Layer 1: Input to Hidden1
-        let z1 = input.dot(&self.weights1) + &self.biases1;
-        let a1 = z1.mapv(Self::relu);
-        
-        // Layer 2: Hidden1 to Hidden2
-        let z2 = a1.dot(&self.weights2) + &self.biases2;
-        let a2 = z2.mapv(Self::relu);
-        
-        // Layer 3: Hidden2 to Output
-        let z3 = a2.dot(&self.weights3) + &self.biases3;
-        let output = z3[0]; // Single output value
-        
-        (a1, a2, z2, output)
+    // Normalize inputs to [0, 1] range
+    fn normalize_input(&self, input: &Array1<f32>) -> Array1<f32> {
+        let mut normalized = Array1::zeros(self.input_size);
+        for i in 0..self.input_size {
+            if self.input_maxs[i] > self.input_mins[i] {
+                normalized[i] = (input[i] - self.input_mins[i]) / (self.input_maxs[i] - self.input_mins[i]);
+            } else {
+                normalized[i] = 0.5;
+            }
+        }
+        normalized
     }
     
-    // Training function using backpropagation
-    fn fit(&mut self, features: &Array2<f32>, targets: &Array1<f32>, epochs: usize, learning_rate: f32) {
-        let n_samples = features.nrows();
-        println!("Training Neural Network for {} epochs...", epochs);
-        println!("Network Architecture: {} -> {} -> {} -> 1", 
-            self.input_size, self.hidden_size1, self.hidden_size2);
-        println!("Training on {} samples", n_samples);
+    // Forward pass through the network
+    fn forward(&self, input: &Array1<f32>) -> (Array1<f32>, Array1<f32>, f32) {
+        let normalized = self.normalize_input(input);
         
-        let mut best_loss = f32::INFINITY;
+        // Hidden layer
+        let z1 = normalized.dot(&self.weights1) + &self.biases1;
+        let a1 = z1.mapv(Self::relu);
+        
+        // Output layer with sigmoid to keep output in [0,1]
+        let z2 = a1.dot(&self.weights2) + &self.biases2;
+        let output = 1.0 / (1.0 + (-z2[0]).exp()); // Sigmoid activation
+        
+        (z1, a1, output)
+    }
+    
+    // Denormalize output back to calorie range
+    fn denormalize_output(&self, output: f32) -> f32 {
+        self.target_min + output * (self.target_max - self.target_min)
+    }
+    
+    // Make prediction
+    fn predict(&self, input: &Array1<f32>) -> f32 {
+        let (_, _, raw_output) = self.forward(input);
+        self.denormalize_output(raw_output)
+    }
+    
+    // Train the network
+    fn train(&mut self, features: &Array2<f32>, targets: &Array1<f32>) {
+        println!(" Training Daily Calorie Predictor...");
+        println!("Architecture: {} -> {} -> 1", self.input_size, self.hidden_size);
+        
+        // Calculate normalization parameters
+        for i in 0..self.input_size {
+            let column = features.column(i);
+            self.input_mins[i] = column.iter().cloned().fold(f32::INFINITY, f32::min);
+            self.input_maxs[i] = column.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        }
+        
+        self.target_min = targets.iter().cloned().fold(f32::INFINITY, f32::min);
+        self.target_max = targets.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        
+        println!(" Target range: {:.0} - {:.0} calories/day", self.target_min, self.target_max);
+        
+        let learning_rate = 0.001;
+        let epochs = 800;
+        let n_samples = features.nrows();
         
         for epoch in 0..epochs {
             let mut total_loss = 0.0;
             
-            // Mini-batch gradient descent (batch size = 1 for simplicity)
             for i in 0..n_samples {
                 let input = features.row(i).to_owned();
                 let target = targets[i];
                 
+                // Normalize target to [0,1]
+                let normalized_target = (target - self.target_min) / (self.target_max - self.target_min);
+                
                 // Forward pass
-                let (a1, a2, z2, output) = self.forward(&input);
+                let (z1, a1, output) = self.forward(&input);
                 
                 // Calculate loss (MSE)
-                let loss = (output - target).powi(2);
+                let loss = (output - normalized_target).powi(2);
                 total_loss += loss;
                 
-                // Backward pass
-                let output_error = 2.0 * (output - target);
+                // Backpropagation
+                let output_error = 2.0 * (output - normalized_target);
                 
-                // Gradients for output layer
-                let d_weights3 = Array2::from_shape_vec((self.hidden_size2, 1), 
-                    a2.iter().map(|&x| x * output_error).collect()).unwrap();
-                let d_biases3 = Array1::from(vec![output_error]);
+                // Sigmoid derivative
+                let sigmoid_derivative = output * (1.0 - output);
+                let output_gradient = output_error * sigmoid_derivative;
                 
-                // Gradients for hidden layer 2
-                let hidden2_error = Array1::from_iter(
-                    (0..self.hidden_size2).map(|j| {
-                        output_error * self.weights3[[j, 0]] * Self::relu_derivative(z2[j])
-                    })
-                );
+                // Update output layer
+                for j in 0..self.hidden_size {
+                    self.weights2[[j, 0]] -= learning_rate * output_gradient * a1[j];
+                }
+                self.biases2[0] -= learning_rate * output_gradient;
                 
-                let d_weights2 = Array2::from_shape_fn((self.hidden_size1, self.hidden_size2), |(i, j)| {
-                    a1[i] * hidden2_error[j]
-                });
-                let d_biases2 = hidden2_error.clone();
-                
-                // Gradients for hidden layer 1
-                let z1 = input.dot(&self.weights1) + &self.biases1;
-                let hidden1_error = Array1::from_iter(
-                    (0..self.hidden_size1).map(|j| {
-                        let sum: f32 = (0..self.hidden_size2).map(|k| {
-                            hidden2_error[k] * self.weights2[[j, k]]
-                        }).sum();
-                        sum * Self::relu_derivative(z1[j])
-                    })
-                );
-                
-                let d_weights1 = Array2::from_shape_fn((self.input_size, self.hidden_size1), |(i, j)| {
-                    input[i] * hidden1_error[j]
-                });
-                let d_biases1 = hidden1_error;
-                
-                // Update weights and biases
-                let lr = learning_rate * (0.995_f32.powi(epoch as i32 / 50)); // Learning rate decay
-                
-                self.weights3 = &self.weights3 - &(d_weights3 * lr);
-                self.biases3 = &self.biases3 - &(d_biases3 * lr);
-                
-                self.weights2 = &self.weights2 - &(d_weights2 * lr);
-                self.biases2 = &self.biases2 - &(d_biases2 * lr);
-                
-                self.weights1 = &self.weights1 - &(d_weights1 * lr);
-                self.biases1 = &self.biases1 - &(d_biases1 * lr);
+                // Update hidden layer
+                let normalized = self.normalize_input(&input);
+                for j in 0..self.hidden_size {
+                    let hidden_error = output_gradient * self.weights2[[j, 0]] * Self::relu_derivative(z1[j]);
+                    self.biases1[j] -= learning_rate * hidden_error;
+                    
+                    for k in 0..self.input_size {
+                        self.weights1[[k, j]] -= learning_rate * hidden_error * normalized[k];
+                    }
+                }
             }
             
-            let avg_loss = total_loss / n_samples as f32;
-            if avg_loss < best_loss {
-                best_loss = avg_loss;
-            }
-            
-            if epoch % 200 == 0 || epoch == epochs - 1 {
-                let current_lr = learning_rate * (0.995_f32.powi(epoch as i32 / 50));
-                println!("  Epoch {}: Loss = {:.4}, LR = {:.6}", epoch, avg_loss, current_lr);
+            if epoch % 100 == 0 {
+                let rmse = (total_loss / n_samples as f32).sqrt() * (self.target_max - self.target_min);
+                println!("  Epoch {}: RMSE = {:.1} calories", epoch, rmse);
             }
         }
         
-        println!("Training complete! Best loss: {:.4}", best_loss);
-        println!("Network learned complex non-linear patterns!");
+        println!(" Training complete!");
     }
     
-    // Predict using the neural network
-    fn predict(&self, input: &Array1<f32>) -> f32 {
-        let (_, _, _, output) = self.forward(input);
-        output.max(1200.0).min(3500.0) // Clamp to reasonable calorie range
-    }
-    
-    // Batch prediction
-    fn predict_batch(&self, features: &Array2<f32>) -> Array1<f32> {
-        let n_samples = features.nrows();
-        let mut predictions = Array1::<f32>::zeros(n_samples);
-        
-        for i in 0..n_samples {
-            let input = features.row(i).to_owned();
-            predictions[i] = self.predict(&input);
+    // Encode working type to one-hot vector
+    fn encode_working_type(&self, working_type: &str) -> Vec<f32> {
+        let mut encoded = vec![0.0; self.working_type_encoder.len()];
+        if let Some(&index) = self.working_type_encoder.get(working_type) {
+            encoded[index] = 1.0;
         }
-        
-        predictions
+        encoded
     }
     
-    // Predict calories with input validation and normalization
-    fn predict_calories(&self, 
-        age: f32, 
-        is_male: bool, 
-        working_type: &str, 
-        sleep_hours: f32, 
-        height_cm: f32
-    ) -> f32 {
-        let gender_encoded = if is_male { 1.0 } else { 0.0 };
+    // Predict daily calorie requirements
+    fn predict_daily_calories(&self, age: f32, is_male: bool, working_type: &str, 
+                             sleep_hours: f32, height_m: f32) -> f32 {
+        let gender = if is_male { 1.0 } else { 0.0 };
+        let working_encoded = self.encode_working_type(working_type);
         
-        let activity_factor = match working_type {
-            "Desk Job" => 1.2,
-            "Manual Labor" => 1.7,
-            "Healthcare" => 1.5,
-            "Freelancer" => 1.3,
-            "Self-Employed" => 1.4,
-            "Student" => 1.3,
-            "Retired" => 1.2,
-            "Unemployed" => 1.2,
-            _ => 1.3,
-        };
+        let mut input_vec = vec![age, gender, sleep_hours, height_m];
+        input_vec.extend(working_encoded);
         
-        // Create input vector
-        let mut input = Array1::from(vec![age, gender_encoded, activity_factor, sleep_hours, height_cm]);
-        
-        // Normalize input using stored statistics
-        for i in [0, 3, 4].iter() { // Normalize age, sleep_hours, height
-            let min_val = self.feature_stats.min_vals[*i];
-            let max_val = self.feature_stats.max_vals[*i];
-            if max_val != min_val {
-                input[*i] = (input[*i] - min_val) / (max_val - min_val);
-            }
-        }
-        
+        let input = Array1::from(input_vec);
         self.predict(&input)
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    println!("NEURAL NETWORK CALORIE PREDICTOR");
-    println!("=====================================");
+// Load the balanced_diet.csv data
+fn load_calorie_data() -> Result<Vec<DailyCalorieData>, Box<dyn Error>> {
+    let file_path = "data/balanced_diet.csv";
     
-    // Step 1: Create or load dataset
-    create_realistic_dataset()?;
-    
-    // Step 2: Load and explore data
-    let data = load_dataset("data/calories.csv")?;
-    println!("Loaded {} training records", data.len());
-    
-    if data.is_empty() {
-        println!("No data found. Please check the dataset.");
-        return Ok(());
+    if !std::path::Path::new(file_path).exists() {
+        return Err(format!("File not found: {}. Please ensure the file exists.", file_path).into());
     }
     
-    // Step 3: Show data statistics
-    show_data_statistics(&data);
-    
-    // Step 4: Preprocess data and get feature stats
-    let (features, targets, feature_stats) = preprocess_data(&data)?;
-    
-    // Step 5: Split data
-    let (train_features, test_features, train_targets, test_targets) = 
-        split_data(features, targets, 0.8);
-    
-    // Step 6: Train neural network
-    let model = train_neural_network(train_features, train_targets, feature_stats)?;
-    
-    // Step 7: Evaluate model
-    evaluate_neural_network(&model, test_features, test_targets)?;
-    
-    // Step 8: Interactive prediction loop
-    interactive_prediction_loop(&model)?;
-    
-    Ok(())
-}
-
-fn create_realistic_dataset() -> Result<(), Box<dyn Error>> {
-    use std::fs;
-    use std::io::Write;
-    
-    if !std::path::Path::new("data").exists() {
-        fs::create_dir("data")?;
-    }
-    
-    if !std::path::Path::new("data/calories.csv").exists() {
-        println!("Creating realistic daily calorie requirement dataset...");
-        
-        let mut file = fs::File::create("data/calories.csv")?;
-        writeln!(file, "ID,Age,Gender,Working_Type,Sleep_Hours,Height_m,Required_Daily_Calories")?;
-        
-        let mut rng = rand::thread_rng();
-        
-        // Generate 3000 realistic daily calorie requirement samples (more data for neural network)
-        for i in 0..3000 {
-            let is_male = rng.gen_bool(0.5);
-            let gender = if is_male { "Male" } else { "Female" };
-            
-            let age = rng.gen_range(18.0..65.0);
-            
-            let height = if is_male {
-                rng.gen_range(1.65..1.95)
-            } else {
-                rng.gen_range(1.55..1.80)
-            };
-            
-            let bmi = rng.gen_range(18.5..30.0);
-            let weight = bmi * height * height;
-            
-            let sleep_hours = rng.gen_range(5.0..10.0);
-            
-            let work_types = ["Desk Job", "Manual Labor", "Healthcare", "Freelancer", "Self-Employed", "Student", "Retired", "Unemployed"];
-            let working_type = work_types[rng.gen_range(0..work_types.len())];
-            
-            // More complex calorie calculation with non-linear factors
-            let bmr = if is_male {
-                (10.0 * weight) + (6.25 * height * 100.0) - (5.0 * age) + 5.0
-            } else {
-                (10.0 * weight) + (6.25 * height * 100.0) - (5.0 * age) - 161.0
-            };
-            
-            let activity_factor = match working_type {
-                "Desk Job" => rng.gen_range(1.2..1.4),
-                "Manual Labor" => rng.gen_range(1.6..1.9),
-                "Healthcare" => rng.gen_range(1.4..1.6),
-                "Student" => rng.gen_range(1.2..1.5),
-                "Freelancer" => rng.gen_range(1.2..1.5),
-                "Self-Employed" => rng.gen_range(1.3..1.6),
-                "Retired" => rng.gen_range(1.2..1.4),
-                _ => rng.gen_range(1.2..1.5),
-            };
-            
-            // Add non-linear sleep factor
-            let sleep_factor = if sleep_hours < 6.0 || sleep_hours > 9.0 {
-                0.95 // Poor sleep reduces metabolism
-            } else {
-                1.0
-            };
-            
-            // Add age-related metabolism decline
-            let age_factor = 1.0 - ((age - 25.0) * 0.005_f32).max(0.0);
-            
-            let daily_calories = bmr * activity_factor * sleep_factor * age_factor;
-            
-            let calories: f32 = daily_calories + rng.gen_range(-150.0..150.0);
-            let calories = calories.max(1200.0).min(3500.0);
-            
-            writeln!(file, "{},{:.1},{},{},{:.1},{:.2},{:.1}", 
-                i as f32, age, gender, working_type, sleep_hours, height, calories)?;
-        }
-        
-        println!("Created realistic dataset with 3000 records for neural network training");
-    }
-    
-    Ok(())
-}
-
-fn load_dataset(path: &str) -> Result<Vec<CalorieData>, Box<dyn Error>> {
-    let mut reader = Reader::from_path(path)?;
+    let mut reader = Reader::from_path(file_path)?;
     let mut data = Vec::new();
     
     for result in reader.deserialize() {
-        let mut record: CalorieData = result?;
-        record.compute_missing_fields();
-        data.push(record);
+        match result {
+            Ok(record) => {
+                let record: DailyCalorieData = record;
+                // Skip records with missing values
+                if !record.age.is_nan() && !record.sleep_hours.is_nan() && 
+                   !record.height_m.is_nan() && !record.required_daily_calories.is_nan() &&
+                   !record.gender.is_empty() && !record.working_type.is_empty() {
+                    data.push(record);
+                }
+            }
+            Err(_) => continue, // Skip malformed records
+        }
     }
     
+    println!(" Loaded {} valid records from {}", data.len(), file_path);
     Ok(data)
 }
 
-fn show_data_statistics(data: &[CalorieData]) {
-    println!("\nDATASET STATISTICS");
+// Show dataset statistics
+fn show_data_statistics(data: &[DailyCalorieData]) {
+    if data.is_empty() {
+        return;
+    }
+    
+    let ages: Vec<f32> = data.iter().map(|d| d.age).collect();
+    let sleep_hours: Vec<f32> = data.iter().map(|d| d.sleep_hours).collect();
+    let heights: Vec<f32> = data.iter().map(|d| d.height_m).collect();
+    let calories: Vec<f32> = data.iter().map(|d| d.required_daily_calories).collect();
+    
+    let avg_age = ages.iter().sum::<f32>() / ages.len() as f32;
+    let avg_sleep = sleep_hours.iter().sum::<f32>() / sleep_hours.len() as f32;
+    let avg_height = heights.iter().sum::<f32>() / heights.len() as f32;
+    let avg_calories = calories.iter().sum::<f32>() / calories.len() as f32;
+    
+    let min_calories = calories.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_calories = calories.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    
+    println!("\n DATASET STATISTICS");
     println!("=====================");
+    println!(" Average age: {:.1} years", avg_age);
+    println!(" Average sleep: {:.1} hours", avg_sleep);
+    println!(" Average height: {:.2} meters", avg_height);
+    println!("  Average daily calories: {:.1}", avg_calories);
+    println!(" Calorie range: {:.0} - {:.0}", min_calories, max_calories);
     
     let male_count = data.iter().filter(|d| d.gender.to_lowercase() == "male").count();
-    let female_count = data.len() - male_count;
+    println!(" Males: {}, Females: {}", male_count, data.len() - male_count);
     
-    let avg_age = data.iter().map(|d| d.age).sum::<f32>() / data.len() as f32;
-    let avg_weight = data.iter().map(|d| d.weight).sum::<f32>() / data.len() as f32;
-    let avg_calories = data.iter().map(|d| d.calories).sum::<f32>() / data.len() as f32;
-    
-    println!("Gender Distribution: {} Male, {} Female", male_count, female_count);
-    println!("Average Age: {:.1} years", avg_age);
-    println!("Average Weight: {:.1} kg", avg_weight);
-    println!("Average Daily Calories: {:.1}", avg_calories);
-    
-    println!("\nSample Training Data:");
-    for (i, record) in data.iter().take(3).enumerate() {
-        println!("  {}. {} {} years, {:.0}kg, {} → {:.0} calories", 
-            i + 1, record.gender, record.age, record.weight, record.working_type, record.calories);
+    // Show working types
+    let mut working_types: HashMap<String, usize> = HashMap::new();
+    for record in data {
+        *working_types.entry(record.working_type.clone()).or_insert(0) += 1;
     }
-    println!();
+    println!("💼 Working types:");
+    for (work_type, count) in working_types {
+        println!("   {}: {}", work_type, count);
+    }
 }
 
-fn preprocess_data(data: &[CalorieData]) -> Result<(Array2<f32>, Array1<f32>, FeatureStats), Box<dyn Error>> {
+// Create working type encoder
+fn create_working_type_encoder(data: &[DailyCalorieData]) -> HashMap<String, usize> {
+    let mut unique_types: Vec<String> = data.iter()
+        .map(|d| d.working_type.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    unique_types.sort();
+    
+    unique_types.into_iter()
+        .enumerate()
+        .map(|(i, work_type)| (work_type, i))
+        .collect()
+}
+
+// Preprocess data for neural network
+fn preprocess_data(data: &[DailyCalorieData], working_type_encoder: &HashMap<String, usize>) -> (Array2<f32>, Array1<f32>) {
     let n_samples = data.len();
-    let n_features = 5;
+    let n_features = 4 + working_type_encoder.len(); // age, gender, sleep, height + one-hot working types
     
     let mut features = Array2::<f32>::zeros((n_samples, n_features));
     let mut targets = Array1::<f32>::zeros(n_samples);
     
-    println!("Preprocessing {} samples for neural network training...", n_samples);
-    
-    let working_types: std::collections::HashMap<&str, f32> = [
-        ("Desk Job", 1.2),
-        ("Manual Labor", 1.7),
-        ("Healthcare", 1.5),
-        ("Freelancer", 1.3),
-        ("Self-Employed", 1.4),
-        ("Student", 1.3),
-        ("Retired", 1.2),
-        ("Unemployed", 1.2),
-    ].iter().cloned().collect();
-    
     for (i, record) in data.iter().enumerate() {
-        let gender_encoded = if record.gender.to_lowercase() == "male" { 1.0 } else { 0.0 };
-        let work_factor = working_types.get(record.working_type.as_str()).unwrap_or(&1.3);
+        let gender = if record.gender.to_lowercase() == "male" { 1.0 } else { 0.0 };
         
+        // Basic features
         features[[i, 0]] = record.age;
-        features[[i, 1]] = gender_encoded;
-        features[[i, 2]] = *work_factor;
-        features[[i, 3]] = record.sleep_hours;
-        features[[i, 4]] = record.height;
+        features[[i, 1]] = gender;
+        features[[i, 2]] = record.sleep_hours;
+        features[[i, 3]] = record.height_m;
         
-        targets[i] = record.calories;
-    }
-    
-    let mut feature_stats = FeatureStats {
-        min_vals: Array1::<f32>::zeros(n_features),
-        max_vals: Array1::<f32>::zeros(n_features),
-        feature_names: vec![
-            "Age".to_string(),
-            "Gender (M=1, F=0)".to_string(), 
-            "Activity Factor".to_string(),
-            "Sleep Hours".to_string(),
-            "Height (cm)".to_string(),
-        ],
-    };
-    
-    println!("Original data ranges:");
-    for j in 0..n_features {
-        let column = features.column(j);
-        let min_val = column.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-        let max_val = column.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-        
-        feature_stats.min_vals[j] = min_val;
-        feature_stats.max_vals[j] = max_val;
-        
-        println!("  {}: {:.1} to {:.1}", feature_stats.feature_names[j], min_val, max_val);
-    }
-    
-    normalize_neural_network_features(&mut features);
-    
-    let target_min = targets.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-    let target_max = targets.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-    let target_mean = targets.mean().unwrap();
-    println!("Target range: {:.0} to {:.0}, mean: {:.0}", target_min, target_max, target_mean);
-    
-    println!("Preprocessing complete");
-    
-    Ok((features, targets, feature_stats))
-}
-
-fn normalize_neural_network_features(features: &mut Array2<f32>) {
-    let (n_samples, n_features) = features.dim();
-    
-    // Normalize continuous features for neural network
-    let continuous_features = [0, 3, 4]; // age, sleep_hours, height
-    
-    for &feature_idx in &continuous_features {
-        let column = features.column(feature_idx);
-        let min_val = column.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-        let max_val = column.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-        
-        if max_val > min_val {
-            for i in 0..n_samples {
-                features[[i, feature_idx]] = (features[[i, feature_idx]] - min_val) / (max_val - min_val);
-            }
+        // One-hot encode working type
+        if let Some(&work_index) = working_type_encoder.get(&record.working_type) {
+            features[[i, 4 + work_index]] = 1.0;
         }
+        
+        targets[i] = record.required_daily_calories;
     }
+    
+    println!(" Preprocessed {} samples with {} features", n_samples, n_features);
+    println!(" Features: Age, Gender, Sleep Hours, Height, Working Type (one-hot)");
+    (features, targets)
 }
 
-fn split_data(
-    features: Array2<f32>, 
-    targets: Array1<f32>, 
-    train_ratio: f32
-) -> (Array2<f32>, Array2<f32>, Array1<f32>, Array1<f32>) {
+// Split data into training and testing sets
+fn split_data(features: Array2<f32>, targets: Array1<f32>) -> (Array2<f32>, Array2<f32>, Array1<f32>, Array1<f32>) {
     let n_samples = features.nrows();
-    let train_size = (n_samples as f32 * train_ratio) as usize;
+    let train_size = (n_samples as f32 * 0.8) as usize;
     
-    println!("Data split: {} training, {} testing", train_size, n_samples - train_size);
+    println!("Training samples: {}, Test samples: {}", train_size, n_samples - train_size);
     
     let train_features = features.slice(ndarray::s![0..train_size, ..]).to_owned();
     let test_features = features.slice(ndarray::s![train_size.., ..]).to_owned();
@@ -567,82 +359,59 @@ fn split_data(
     (train_features, test_features, train_targets, test_targets)
 }
 
-fn train_neural_network(features: Array2<f32>, targets: Array1<f32>, feature_stats: FeatureStats) -> Result<NeuralNetwork, Box<dyn Error>> {
-    let input_size = features.ncols();
-    let hidden_size1 = 16; // First hidden layer
-    let hidden_size2 = 8;  // Second hidden layer
+// Evaluate model performance
+fn evaluate_model(model: &DailyCaloriePredictor, test_features: &Array2<f32>, test_targets: &Array1<f32>) {
+    println!("\n EVALUATING MODEL PERFORMANCE");
+    println!("===============================");
     
-    let mut model = NeuralNetwork::new(input_size, hidden_size1, hidden_size2);
-    model.feature_stats = feature_stats;
+    let mut total_error = 0.0;
+    let mut total_abs_error = 0.0;
+    let n_samples = test_features.nrows();
     
-    println!("Neural Network Architecture:");
-    println!("   Input Layer: {} neurons", input_size);
-    println!("   Hidden Layer 1: {} neurons (ReLU)", hidden_size1);
-    println!("   Hidden Layer 2: {} neurons (ReLU)", hidden_size2);
-    println!("   Output Layer: 1 neuron (Linear)");
+    for i in 0..n_samples {
+        let input = test_features.row(i).to_owned();
+        let prediction = model.predict(&input);
+        let actual = test_targets[i];
+        
+        let error = prediction - actual;
+        total_error += error * error;
+        total_abs_error += error.abs();
+    }
     
-    model.fit(&features, &targets, 3000, 0.01); // More epochs for neural network
+    let rmse = (total_error / n_samples as f32).sqrt();
+    let mae = total_abs_error / n_samples as f32;
     
-    Ok(model)
-}
-
-fn evaluate_neural_network(
-    model: &NeuralNetwork, 
-    test_features: Array2<f32>, 
-    test_targets: Array1<f32>
-) -> Result<(), Box<dyn Error>> {
-    println!("\nEVALUATING NEURAL NETWORK PERFORMANCE");
-    println!("========================================");
+    println!(" RMSE: {:.1} calories", rmse);
+    println!(" MAE: {:.1} calories", mae);
     
-    let predictions = model.predict_batch(&test_features);
-    
-    let mse = (&predictions - &test_targets).mapv(|x| x * x).mean().unwrap();
-    let rmse = mse.sqrt();
-    let mae = (&predictions - &test_targets).mapv(|x| x.abs()).mean().unwrap();
-    
-    let target_mean = test_targets.mean().unwrap();
-    let ss_tot = (&test_targets - target_mean).mapv(|x| x * x).sum();
-    let ss_res = (&predictions - &test_targets).mapv(|x| x * x).sum();
-    let r2 = 1.0 - (ss_res / ss_tot);
-    
-    println!("Performance Metrics:");
-    println!("   RMSE: {:.2} calories", rmse);
-    println!("   MAE: {:.2} calories", mae);
-    println!("   R² Score: {:.4} ({:.1}%)", r2, r2 * 100.0);
-    
-    let quality = match r2 {
-        x if x > 0.9 => "Excellent",
-        x if x > 0.8 => "Very Good",
-        x if x > 0.7 => "Good", 
-        x if x > 0.6 => "Fair",
-        _ => " Poor"
-    };
-    println!("   Model Quality: {}", quality);
-    
-    println!("\nSample Predictions vs Actual:");
-    for i in 0..10.min(test_targets.len()) {
-        let error_pct = ((predictions[i] - test_targets[i]).abs() / test_targets[i]) * 100.0;
+    // Show a few sample predictions
+    println!("\n SAMPLE PREDICTIONS:");
+    for i in 0..5.min(n_samples) {
+        let input = test_features.row(i).to_owned();
+        let prediction = model.predict(&input);
+        let actual = test_targets[i];
+        let error_pct = ((prediction - actual).abs() / actual) * 100.0;
         println!("   Predicted: {:.0}, Actual: {:.0}, Error: {:.1}%", 
-            predictions[i], test_targets[i], error_pct);
+                prediction, actual, error_pct);
     }
     
     println!();
-    Ok(())
 }
 
-fn interactive_prediction_loop(model: &NeuralNetwork) -> Result<(), Box<dyn Error>> {
-    println!("\nNEURAL NETWORK CALORIE CALCULATOR");
-    println!("====================================");
-    println!("Using deep learning to predict your daily calorie requirements!");
+// Interactive prediction mode
+fn interactive_mode(model: &DailyCaloriePredictor) -> Result<(), Box<dyn Error>> {
+    println!(" DAILY CALORIE REQUIREMENT PREDICTOR");
+    println!("=======================================");
+    println!("Predict your daily calorie needs based on your lifestyle!");
     
     loop {
-        println!("\nEnter details (or 'quit' to exit):");
+        println!("\nEnter your details (or 'quit' to exit):");
         
-        print!("Age (18-80): ");
+        print!("Age: ");
         io::stdout().flush()?;
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
-        if input.trim().to_lowercase() == "quit" { break; }
+        if input.trim() == "quit" { break; }
         let age: f32 = input.trim().parse().unwrap_or(30.0);
         
         print!("Gender (M/F): ");
@@ -651,90 +420,74 @@ fn interactive_prediction_loop(model: &NeuralNetwork) -> Result<(), Box<dyn Erro
         io::stdin().read_line(&mut input)?;
         let is_male = input.trim().to_lowercase().starts_with('m');
         
-        println!("Working Type:");
-        println!("  1. Desk Job");
-        println!("  2. Manual Labor");
-        println!("  3. Healthcare");
-        println!("  4. Freelancer");
-        println!("  5. Self-Employed");
-        println!("  6. Student");
-        println!("  7. Retired");
-        println!("  8. Unemployed");
-        print!("Choice (1-8): ");
+        print!("Working Type (Desk Job/Manual Labor/Healthcare/Freelancer/Student/Retired/Unemployed/Self-Employed): ");
         io::stdout().flush()?;
         input.clear();
         io::stdin().read_line(&mut input)?;
-        let work_choice: usize = input.trim().parse().unwrap_or(1);
-        let working_type = match work_choice {
-            1 => "Desk Job",
-            2 => "Manual Labor",
-            3 => "Healthcare",
-            4 => "Freelancer",
-            5 => "Self-Employed",
-            6 => "Student",
-            7 => "Retired",
-            _ => "Unemployed",
-        };
+        let working_type = input.trim().to_string();
         
-        print!("Sleep hours per night (3-12): ");
+        print!("Sleep hours per night: ");
         io::stdout().flush()?;
         input.clear();
         io::stdin().read_line(&mut input)?;
         let sleep_hours: f32 = input.trim().parse().unwrap_or(7.5);
         
-        print!("Height in cm (140-220): ");
+        print!("Height in meters (e.g., 1.75): ");
         io::stdout().flush()?;
         input.clear();
         io::stdin().read_line(&mut input)?;
-        let height_cm: f32 = input.trim().parse().unwrap_or(170.0);
+        let height_m: f32 = input.trim().parse().unwrap_or(1.70);
         
-        // Get neural network prediction
-        let nn_prediction = model.predict_calories(age, is_male, working_type, sleep_hours, height_cm);
+        // Get prediction
+        let predicted_calories = model.predict_daily_calories(
+            age, is_male, &working_type, sleep_hours, height_m
+        );
         
-        // Calculate traditional BMR for comparison
-        let weight = if is_male {
-            height_cm * 0.45 - 10.0
-        } else {
-            height_cm * 0.4 - 5.0
-        };
-        
-        let bmr = if is_male {
-            (10.0 * weight) + (6.25 * height_cm) - (5.0 * age) + 5.0
-        } else {
-            (10.0 * weight) + (6.25 * height_cm) - (5.0 * age) - 161.0
-        };
-        
-        let activity_multiplier = match working_type {
-            "Manual Labor" => 1.7,
-            "Healthcare" => 1.5,
-            "Student" => 1.4,
-            "Desk Job" => 1.3,
-            _ => 1.4,
-        };
-        
-        let traditional_estimate = bmr * activity_multiplier;
-        
-        println!("\nNEURAL NETWORK PREDICTION");
-        println!("============================");
-        println!("Profile: {} {}, {:.0}cm, {} work", 
-            if is_male { "Male" } else { "Female" }, age, height_cm, working_type);
-        println!("Sleep: {:.1} hours per night", sleep_hours);
-        println!("Estimated Weight: {:.0}kg", weight);
+        println!("\n CALORIE PREDICTION RESULTS");
+        println!("=============================");
+        println!("Profile: {} {}, {:.1}m tall", 
+            if is_male { "Male" } else { "Female" }, age, height_m);
+        println!("Lifestyle: {} with {:.1} hours sleep", working_type, sleep_hours);
         println!();
-        println!("Neural Network: {:.0} calories/day", nn_prediction);
-        println!("Traditional BMR: {:.0} calories/day", traditional_estimate);
-        
-        let difference = (nn_prediction - traditional_estimate).abs();
-        if difference < 100.0 {
-            println!("Predictions are very similar!");
-        } else if difference < 200.0 {
-            println!("Neural network found subtle patterns!");
-        } else {
-            println!("Neural network detected complex relationships!");
-        }
-        
-        println!("The neural network learned from complex patterns in the data.");
+        println!(" Neural Network Prediction: {:.0} calories/day", predicted_calories);
     }
+    
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    println!("NEURAL NETWORK DAILY CALORIE PREDICTOR");
+    println!("==========================================");
+    
+    // Load data from balanced_diet.csv
+    let data = load_calorie_data()?;
+    
+    if data.is_empty() {
+        println!("No valid data found. Please check that data/balanced_diet.csv exists and contains valid data.");
+        return Ok(());
+    }
+    
+    // Show dataset statistics
+    show_data_statistics(&data);
+    
+    // Create working type encoder
+    let working_type_encoder = create_working_type_encoder(&data);
+    println!("\n🏷️  Working type categories: {:?}", working_type_encoder.keys().collect::<Vec<_>>());
+    
+    // Preprocess data
+    let (features, targets) = preprocess_data(&data, &working_type_encoder);
+    let (train_features, test_features, train_targets, test_targets) = split_data(features, targets);
+    
+    // Train the neural network
+    let n_features = 4 + working_type_encoder.len();
+    let mut model = DailyCaloriePredictor::new(n_features, working_type_encoder);
+    model.train(&train_features, &train_targets);
+    
+    // Evaluate the model
+    evaluate_model(&model, &test_features, &test_targets);
+    
+    // Interactive prediction mode
+    interactive_mode(&model)?;
     
     Ok(())
 }
