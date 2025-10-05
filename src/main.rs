@@ -6,6 +6,8 @@ use ndarray::{Array1, Array2};
 use rand::Rng;
 use std::collections::HashMap;
 
+const EMBEDDED_CSV: &str = include_str!("../data/balanced_diet.csv");
+
 #[derive(Debug, Deserialize, Clone)]
 struct DailyCalorieData {
     #[serde(rename = "ID")]
@@ -230,13 +232,15 @@ impl DailyCaloriePredictor {
 
 // Load the balanced_diet.csv data
 fn load_calorie_data() -> Result<Vec<DailyCalorieData>, Box<dyn Error>> {
-    let file_path = "data/balanced_diet.csv";
+    // Try to load from file first, fall back to embedded data
+    let csv_content = if std::path::Path::new("data/balanced_diet.csv").exists() {
+        std::fs::read_to_string("data/balanced_diet.csv")?
+    } else {
+        println!("📁 Using embedded dataset...");
+        EMBEDDED_CSV.to_string()
+    };
     
-    if !std::path::Path::new(file_path).exists() {
-        return Err(format!("File not found: {}. Please ensure the file exists.", file_path).into());
-    }
-    
-    let mut reader = Reader::from_path(file_path)?;
+    let mut reader = csv::Reader::from_reader(csv_content.as_bytes());
     let mut data = Vec::new();
     
     for result in reader.deserialize() {
@@ -250,11 +254,11 @@ fn load_calorie_data() -> Result<Vec<DailyCalorieData>, Box<dyn Error>> {
                     data.push(record);
                 }
             }
-            Err(_) => continue, // Skip malformed records
+            Err(_) => continue,
         }
     }
     
-    println!(" Loaded {} valid records from {}", data.len(), file_path);
+    println!("Loaded {} valid records", data.len());
     Ok(data)
 }
 
@@ -293,7 +297,7 @@ fn show_data_statistics(data: &[DailyCalorieData]) {
     for record in data {
         *working_types.entry(record.working_type.clone()).or_insert(0) += 1;
     }
-    println!("💼 Working types:");
+    println!("Working types:");
     for (work_type, count) in working_types {
         println!("   {}: {}", work_type, count);
     }
@@ -472,7 +476,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     // Create working type encoder
     let working_type_encoder = create_working_type_encoder(&data);
-    println!("\n🏷️  Working type categories: {:?}", working_type_encoder.keys().collect::<Vec<_>>());
+    println!("\nWorking type categories: {:?}", working_type_encoder.keys().collect::<Vec<_>>());
     
     // Preprocess data
     let (features, targets) = preprocess_data(&data, &working_type_encoder);
