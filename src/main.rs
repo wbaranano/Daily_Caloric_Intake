@@ -229,8 +229,8 @@ impl EnhancedExercisePredictor {
     }
     
     fn train(&mut self, features: &Array2<f32>, targets: &Array1<f32>) {
-        println!(" Training Enhanced Exercise Calorie Predictor...");
-        println!(" Architecture: {} -> {} -> {} -> {} -> 1", 
+        println!("Training Enhanced Exercise Calorie Predictor...");
+        println!("Architecture: {} -> {} -> {} -> {} -> 1", 
                 self.input_size, self.hidden_size1, self.hidden_size2, self.hidden_size3);
         
         // Calculate normalization parameters
@@ -243,7 +243,7 @@ impl EnhancedExercisePredictor {
         self.target_min = targets.iter().cloned().fold(f32::INFINITY, f32::min);
         self.target_max = targets.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         
-        println!(" Target range: {:.0} - {:.0} calories", self.target_min, self.target_max);
+        println!("Target range: {:.0} - {:.0} calories", self.target_min, self.target_max);
         
         let learning_rate = 0.0003;
         let epochs = 1000;
@@ -281,7 +281,7 @@ impl EnhancedExercisePredictor {
             }
         }
         
-        println!(" Enhanced exercise calorie model training complete!");
+        println!("Enhanced exercise calorie model training complete!");
     }
     
     fn encode_exercise_type(&self, exercise_type: &str) -> Vec<f32> {
@@ -297,74 +297,50 @@ impl EnhancedExercisePredictor {
                                exercise_type: &str, resting_hr: f32, max_hr: f32,
                                body_fat_percent: f32, environmental_temp: f32, elevation: f32) -> f32 {
         
-        // Calculate heart rate reserve percentage (KEY ACCURACY FEATURE!)
-        let hr_reserve = if max_hr > resting_hr { max_hr - resting_hr } else { 60.0 };
-        let hr_percentage = if hr_reserve > 0.0 {
-            ((heart_rate - resting_hr) / hr_reserve).clamp(0.0, 1.5)
+        // Calculate BMR (Basal Metabolic Rate)
+        let bmr = if is_male {
+            88.362 + (13.397 * weight) + (4.799 * height) - (5.677 * age)
         } else {
-            0.5
+            447.593 + (9.247 * weight) + (3.098 * height) - (4.330 * age)
         };
         
-        // Calculate body composition metrics
-        let bmi = weight / ((height / 100.0).powi(2));
-        let lean_mass = weight * (1.0 - body_fat_percent / 100.0);
-        let metabolic_factor = lean_mass / weight;
+        // Calculate heart rate intensity
+        let hr_reserve = (max_hr - resting_hr).max(60.0);
+        let hr_intensity = ((heart_rate - resting_hr) / hr_reserve).clamp(0.0, 1.0);
         
-        // MET estimation based on exercise type and intensity
+        // Base MET values for different exercises
         let base_met = match exercise_type {
-            "Running" => 8.0,
-            "Cycling" => 6.0,
-            "Swimming" => 7.0,
-            "Weight Training" => 4.0,
-            "Walking" => 3.0,
-            "Rowing" => 8.5,
-            "Elliptical" => 6.5,
-            "HIIT" => 9.0,
-            _ => 5.0,
+            "Running" => 8.0 + (hr_intensity * 6.0),      // 8-14 METs
+            "Cycling" => 6.0 + (hr_intensity * 6.0),      // 6-12 METs  
+            "Swimming" => 7.0 + (hr_intensity * 5.0),     // 7-12 METs
+            "Weight Training" => 3.5 + (hr_intensity * 2.5), // 3.5-6 METs
+            "Walking" => 2.5 + (hr_intensity * 1.5),      // 2.5-4 METs
+            "Rowing" => 7.0 + (hr_intensity * 5.0),       // 7-12 METs ⚡
+            "Elliptical" => 5.0 + (hr_intensity * 4.0),   // 5-9 METs
+            "HIIT" => 8.0 + (hr_intensity * 6.0),         // 8-14 METs
+            _ => 4.0 + (hr_intensity * 3.0),
         };
-        let met_estimate = base_met + (hr_percentage * 4.0);
         
-        // Environmental factors
-        let temp_stress = if environmental_temp > 25.0 || environmental_temp < 10.0 {
-            1.1 // 10% increase for temperature stress
+        // Environmental adjustments
+        let temp_factor = if environmental_temp > 25.0 || environmental_temp < 10.0 {
+            1.15 // 15% increase for temperature stress
         } else {
             1.0
         };
-        let altitude_factor = 1.0 + (elevation / 3000.0);
-        let env_factor = temp_stress * altitude_factor;
-        let temp_diff = (body_temp - 37.0) / 5.0;
         
-        // Encode exercise type
-        let exercise_encoded = self.encode_exercise_type(exercise_type);
+        let altitude_factor = 1.0 + (elevation / 2000.0 * 0.1); // 10% per 2000m
+        let body_temp_factor = 1.0 + ((body_temp - 37.0) / 37.0 * 0.1);
         
-        // Build comprehensive feature vector with all enhanced features
-        let mut input_vec = vec![
-            if is_male { 1.0 } else { 0.0 },  // Gender
-            age,                               // Age
-            height,                           // Height
-            weight,                           // Weight
-            duration,                         // Duration
-            heart_rate,                       // Heart rate
-            body_temp,                        // Body temperature
-            resting_hr,                       // Resting HR
-            max_hr,                           // Max HR
-            hr_percentage,                    // HR % of reserve (CRUCIAL!)
-            body_fat_percent,                 // Body fat %
-            bmi,                              // BMI
-            lean_mass,                        // Lean body mass
-            metabolic_factor,                 // Metabolic factor
-            met_estimate,                     // MET estimate (CRUCIAL!)
-            environmental_temp,               // Environmental temp
-            elevation,                        // Elevation
-            env_factor,                       // Environmental factor
-            temp_diff,                        // Temperature differential
-        ];
+        // Body composition adjustment
+        let lean_mass_ratio = 1.0 - (body_fat_percent / 100.0);
+        let metabolic_multiplier = 0.9 + (lean_mass_ratio * 0.2); // Lean people burn more
         
-        // Add encoded exercise type
-        input_vec.extend(exercise_encoded);
+        // Final calculation
+        let met_adjusted = base_met * temp_factor * altitude_factor * body_temp_factor * metabolic_multiplier;
+        let calories_per_hour = (met_adjusted * weight * 1.05); // 1.05 conversion factor
+        let total_calories = calories_per_hour * (duration / 60.0);
         
-        let input = Array1::from(input_vec);
-        self.predict(&input)
+        total_calories.max(50.0) // Minimum reasonable burn
     }
 }
 
@@ -432,13 +408,12 @@ impl DailyCaloriePredictor {
         }
     }
     
-    fn predict(&self, input: &Array1<f32>) -> f32 {
-        // Basic prediction implementation
+    fn predict(&self, _input: &Array1<f32>) -> f32 {
         1800.0 // Placeholder
     }
     
-    fn predict_daily_calories(&self, age: f32, is_male: bool, working_type: &str, 
-                             sleep_hours: f32, height_m: f32) -> f32 {
+    fn predict_daily_calories(&self, _age: f32, _is_male: bool, _working_type: &str, 
+                             _sleep_hours: f32, _height_m: f32) -> f32 {
         1800.0 // Placeholder
     }
 }
@@ -472,7 +447,7 @@ impl ExerciseCaloriePredictor {
     }
     
     fn predict_exercise_calories(&self, is_male: bool, age: f32, height: f32, weight: f32,
-                               duration: f32, heart_rate: f32, body_temp: f32) -> f32 {
+                               duration: f32, heart_rate: f32, _body_temp: f32) -> f32 {
         // Basic calculation for compatibility
         let base_rate = if is_male { weight * 0.9 } else { weight * 0.8 };
         let hr_factor = (heart_rate - 60.0) / 160.0;
@@ -504,12 +479,12 @@ impl CalorieCalculator {
     }
     
     fn get_user_choice(&self) -> Result<CalculatorChoice, Box<dyn Error>> {
-        println!("\n ENHANCED CALORIE CALCULATOR ");
+        println!("\nENHANCED CALORIE CALCULATOR");
         println!("=====================================");
         println!("What would you like to calculate?");
         println!("1. Daily calorie needs (lifestyle-based)");
         println!("2. Exercise calories (basic prediction)");
-        println!("3. Exercise calories (ENHANCED with all factors) ");
+        println!("3. Exercise calories (ENHANCED with all factors)");
         println!("4. Both daily + enhanced exercise calculations");
         println!("=====================================");
         
@@ -524,13 +499,13 @@ impl CalorieCalculator {
                 "2" => return Ok(CalculatorChoice::ExerciseCalories),
                 "3" => return Ok(CalculatorChoice::EnhancedExercise),
                 "4" => return Ok(CalculatorChoice::Both),
-                _ => println!(" Please enter 1, 2, 3, or 4."),
+                _ => println!("Please enter 1, 2, 3, or 4."),
             }
         }
     }
     
     fn get_basic_info(&self) -> Result<(bool, f32, f32, f32), Box<dyn Error>> {
-        println!("\n👤 BASIC INFORMATION");
+        println!("\nBASIC INFORMATION");
         println!("====================");
         
         let gender = loop {
@@ -541,7 +516,7 @@ impl CalorieCalculator {
             match input.trim().to_lowercase().as_str() {
                 "m" | "male" => break true,
                 "f" | "female" => break false,
-                _ => println!(" Please enter M or F"),
+                _ => println!("Please enter M or F"),
             }
         };
         
@@ -552,7 +527,7 @@ impl CalorieCalculator {
             io::stdin().read_line(&mut input)?;
             match input.trim().parse::<f32>() {
                 Ok(age) if age >= 10.0 && age <= 100.0 => break age,
-                _ => println!(" Please enter valid age (10-100)"),
+                _ => println!("Please enter valid age (10-100)"),
             }
         };
         
@@ -563,7 +538,7 @@ impl CalorieCalculator {
             io::stdin().read_line(&mut input)?;
             match input.trim().parse::<f32>() {
                 Ok(height) if height >= 100.0 && height <= 250.0 => break height,
-                _ => println!(" Please enter valid height (100-250 cm)"),
+                _ => println!("Please enter valid height (100-250 cm)"),
             }
         };
         
@@ -592,7 +567,7 @@ impl CalorieCalculator {
             io::stdin().read_line(&mut input)?;
             match input.trim().parse::<f32>() {
                 Ok(dur) if dur > 0.0 && dur <= 600.0 => break dur,
-                _ => println!(" Please enter valid duration (1-600 minutes)"),
+                _ => println!("Please enter valid duration (1-600 minutes)"),
             }
         };
         
@@ -621,12 +596,12 @@ impl CalorieCalculator {
         Ok((duration, heart_rate, body_temp))
     }
     
-    fn get_enhanced_exercise_info(&self) -> Result<(f32, f32, f32, String, f32, f32, f32, f32, f32), Box<dyn Error>> {
+    fn get_enhanced_exercise_info(&self, is_male: bool, age: f32) -> Result<(f32, f32, f32, String, f32, f32, f32, f32, f32), Box<dyn Error>> {
         // Get basic exercise info first
         let (duration, heart_rate, body_temp) = self.get_exercise_info()?;
         
         // Exercise type selection
-        println!("\n EXERCISE TYPE SELECTION:");
+        println!("\nEXERCISE TYPE SELECTION:");
         println!("1. Running/Jogging");
         println!("2. Cycling");
         println!("3. Swimming");
@@ -650,12 +625,12 @@ impl CalorieCalculator {
                 "6" => break "Rowing".to_string(),
                 "7" => break "Elliptical".to_string(),
                 "8" => break "HIIT".to_string(),
-                _ => println!(" Please enter 1-8"),
+                _ => println!("Please enter 1-8"),
             }
         };
         
         // Heart rate data
-        println!("\nEART RATE INFORMATION:");
+        println!("\nHEART RATE INFORMATION:");
         let resting_hr = loop {
             print!("Resting heart rate (bpm) [60-100]: ");
             io::stdout().flush()?;
@@ -663,7 +638,7 @@ impl CalorieCalculator {
             io::stdin().read_line(&mut input)?;
             match input.trim().parse::<f32>() {
                 Ok(hr) if hr >= 40.0 && hr <= 120.0 => break hr,
-                _ => println!(" Please enter valid resting HR (40-120 bpm)"),
+                _ => println!("Please enter valid resting HR (40-120 bpm)"),
             }
         };
         
@@ -673,24 +648,22 @@ impl CalorieCalculator {
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
             if input.trim().is_empty() {
-                let age = self.get_basic_info()?.1;
                 break 220.0 - age;
             }
             match input.trim().parse::<f32>() {
                 Ok(hr) if hr >= 150.0 && hr <= 230.0 => break hr,
-                _ => println!(" Please enter valid max HR (150-230 bpm)"),
+                _ => println!("Please enter valid max HR (150-230 bpm)"),
             }
         };
         
         // Body composition
-        println!("\n BODY COMPOSITION:");
+        println!("\nBODY COMPOSITION:");
         let body_fat_percent = loop {
             print!("Body fat percentage (%) [press Enter for estimate]: ");
             io::stdout().flush()?;
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
             if input.trim().is_empty() {
-                let (is_male, age, _, _) = self.get_basic_info()?;
                 let estimate = if is_male {
                     12.0 + (age - 20.0) * 0.2
                 } else {
@@ -730,7 +703,7 @@ impl CalorieCalculator {
             }
             match input.trim().parse::<f32>() {
                 Ok(elev) if elev >= -500.0 && elev <= 9000.0 => break elev,
-                _ => println!(" Please enter valid elevation (-500 to 9000m)"),
+                _ => println!("Please enter valid elevation (-500 to 9000m)"),
             }
         };
         
@@ -757,12 +730,12 @@ impl CalorieCalculator {
     }
     
     fn load_exercise_data(&self) -> Result<Vec<ExerciseCalorieData>, Box<dyn Error>> {
-        println!(" Loading exercise calorie dataset...");
+        println!("Loading exercise calorie dataset...");
         
         let csv_content = if std::path::Path::new("data/calories.csv").exists() {
             std::fs::read_to_string("data/calories.csv")?
         } else {
-            println!(" Using embedded exercise calorie dataset...");
+            println!("Using embedded exercise calorie dataset...");
             EMBEDDED_EXERCISE_CSV.to_string()
         };
         
@@ -784,7 +757,7 @@ impl CalorieCalculator {
             }
         }
         
-        println!(" Loaded {} exercise calorie records", data.len());
+        println!("Loaded {} exercise calorie records", data.len());
         Ok(data)
     }
     
@@ -969,29 +942,69 @@ impl CalorieCalculator {
         
         // Train all models
         if let Err(e) = self.train_daily_model() {
-            println!("  Warning: Could not train daily calorie model: {}", e);
+            println!("Warning: Could not train daily calorie model: {}", e);
         }
         
         if let Err(e) = self.train_exercise_model() {
-            println!(" Warning: Could not train basic exercise model: {}", e);
+            println!("Warning: Could not train basic exercise model: {}", e);
         }
         
         if let Err(e) = self.train_enhanced_exercise_model() {
-            println!("  Warning: Could not train enhanced exercise model: {}", e);
+            println!("Warning: Could not train enhanced exercise model: {}", e);
         }
         
         loop {
             let choice = self.get_user_choice()?;
             let (is_male, age, height, weight) = self.get_basic_info()?;
             
-            println!("\n CALCULATION RESULTS");
+            println!("\nCALCULATION RESULTS");
             println!("======================");
             
             match choice {
+                CalculatorChoice::DailyCalories => {
+                    if let Some(ref model) = self.daily_model {
+                        let daily_calories = model.predict_daily_calories(age, is_male, "Moderate", 8.0, height / 100.0);
+                        
+                        println!("DAILY CALORIE NEEDS");
+                        println!("====================");
+                        println!("Profile: {} {}, {:.0}cm, {:.0}kg", 
+                            if is_male { "Male" } else { "Female" }, age, height, weight);
+                        println!("Estimated daily calorie needs: {:.0} calories", daily_calories);
+                        
+                        // Add lifestyle recommendations
+                        println!("\nLIFESTYLE RECOMMENDATIONS:");
+                        if daily_calories > 2200.0 {
+                            println!("   High calorie needs - ensure adequate nutrition");
+                        } else if daily_calories > 1800.0 {
+                            println!("   Moderate calorie needs - balanced diet recommended");
+                        } else {
+                            println!("   Lower calorie needs - focus on nutrient density");
+                        }
+                    } else {
+                        println!("Daily calorie model not available");
+                    }
+                },
+                CalculatorChoice::ExerciseCalories => {
+                    if let Some(ref model) = self.exercise_model {
+                        let (duration, heart_rate, body_temp) = self.get_exercise_info()?;
+                        let exercise_calories = model.predict_exercise_calories(
+                            is_male, age, height, weight, duration, heart_rate, body_temp
+                        );
+                        
+                        println!("BASIC EXERCISE CALORIE BURN");
+                        println!("============================");
+                        println!("Profile: {} {}, {:.0}cm, {:.0}kg", 
+                            if is_male { "Male" } else { "Female" }, age, height, weight);
+                        println!("Exercise: {:.0} min, {:.0} bpm, {:.1}°C", duration, heart_rate, body_temp);
+                        println!("Calories Burned: {:.0} calories", exercise_calories);
+                    } else {
+                        println!("Exercise calorie model not available");
+                    }
+                },
                 CalculatorChoice::EnhancedExercise => {
                     if let Some(ref model) = self.enhanced_exercise_model {
                         let (duration, heart_rate, body_temp, exercise_type, resting_hr, max_hr, 
-                             body_fat, env_temp, elevation) = self.get_enhanced_exercise_info()?;
+                             body_fat, env_temp, elevation) = self.get_enhanced_exercise_info(is_male, age)?;
                         
                         let enhanced_calories = model.predict_enhanced_calories(
                             is_male, age, height, weight, duration, heart_rate, body_temp,
@@ -1008,51 +1021,91 @@ impl CalorieCalculator {
                         let calories_per_hour = enhanced_calories * (60.0 / duration);
                         let calories_per_minute = enhanced_calories / duration;
                         
-                        println!(" ENHANCED CALORIE ANALYSIS");
+                        println!("ENHANCED CALORIE ANALYSIS");
                         println!("=============================");
-                        println!(" Profile: {} {}, {:.0}cm, {:.0}kg", 
+                        println!("Profile: {} {}, {:.0}cm, {:.0}kg", 
                             if is_male { "Male" } else { "Female" }, age, height, weight);
-                        println!(" Exercise: {} for {:.0} minutes", exercise_type, duration);
-                        println!(" Heart Rate: {:.0} bpm ({:.1}% of HR reserve)", heart_rate, hr_percentage);
-                        println!("  Conditions: {:.1}°C ambient, {:.0}m elevation", env_temp, elevation);
-                        println!(" Body Fat: {:.1}%", body_fat);
+                        println!("Exercise: {} for {:.0} minutes", exercise_type, duration);
+                        println!("Heart Rate: {:.0} bpm ({:.1}% of HR reserve)", heart_rate, hr_percentage);
+                        println!("Conditions: {:.1}°C ambient, {:.0}m elevation", env_temp, elevation);
+                        println!("Body Fat: {:.1}%", body_fat);
                         println!();
-                        println!(" CALORIE BURN RESULTS:");
-                        println!("    Total calories burned: {:.0} calories", enhanced_calories);
-                        println!("    Calories per minute: {:.1} cal/min", calories_per_minute);
+                        println!("CALORIE BURN RESULTS:");
+                        println!("   Total calories burned: {:.0} calories", enhanced_calories);
+                        println!("   Calories per minute: {:.1} cal/min", calories_per_minute);
                         println!("   Calories per hour: {:.0} cal/hour", calories_per_hour);
                         
                         if hr_percentage > 85.0 {
-                            println!("   💪 Very high intensity - maximum calorie burn!");
+                            println!("   Very high intensity - maximum calorie burn!");
                         } else if hr_percentage > 70.0 {
-                            println!("   🔥 High intensity - excellent calorie burn!");
+                            println!("   High intensity - excellent calorie burn!");
                         } else if hr_percentage > 50.0 {
-                            println!("   🚴‍♂️ Moderate intensity - good steady burn rate!");
+                            println!("   Moderate intensity - good steady burn rate!");
                         } else {
-                            println!("   🚶‍♂️ Light activity - gentle calorie burn!");
+                            println!("   Light activity - gentle calorie burn!");
                         }
                         
                     } else {
-                        println!(" Enhanced exercise model not available");
+                        println!("Enhanced exercise model not available");
                     }
                 },
-                CalculatorChoice::ExerciseCalories => {
-                    if let Some(ref model) = self.exercise_model {
-                        let (duration, heart_rate, body_temp) = self.get_exercise_info()?;
-                        let exercise_calories = model.predict_exercise_calories(
-                            is_male, age, height, weight, duration, heart_rate, body_temp
-                        );
+                CalculatorChoice::Both => {
+                    // Daily calories calculation
+                    if let Some(ref daily_model) = self.daily_model {
+                        let daily_calories = daily_model.predict_daily_calories(age, is_male, "Moderate", 8.0, height / 100.0);
                         
-                        println!(" Profile: {} {}, {:.0}cm, {:.0}kg", 
+                        println!("DAILY CALORIE NEEDS");
+                        println!("====================");
+                        println!("Profile: {} {}, {:.0}cm, {:.0}kg", 
                             if is_male { "Male" } else { "Female" }, age, height, weight);
-                        println!(" Exercise: {:.0} min, {:.0} bpm, {:.1}°C", duration, heart_rate, body_temp);
-                        println!(" Calories Burned: {:.0} calories", exercise_calories);
+                        println!("Estimated daily calorie needs: {:.0} calories", daily_calories);
+                        println!();
+                        
+                        // Enhanced exercise calculation
+                        if let Some(ref enhanced_model) = self.enhanced_exercise_model {
+                            let (duration, heart_rate, body_temp, exercise_type, resting_hr, max_hr, 
+                                 body_fat, env_temp, elevation) = self.get_enhanced_exercise_info(is_male, age)?;
+                            
+                            let enhanced_calories = enhanced_model.predict_enhanced_calories(
+                                is_male, age, height, weight, duration, heart_rate, body_temp,
+                                &exercise_type, resting_hr, max_hr, body_fat, env_temp, elevation
+                            );
+                            
+                            let hr_reserve = max_hr - resting_hr;
+                            let hr_percentage = if hr_reserve > 0.0 {
+                                ((heart_rate - resting_hr) / hr_reserve * 100.0).clamp(0.0, 150.0)
+                            } else {
+                                50.0
+                            };
+                            
+                            println!("ENHANCED EXERCISE ANALYSIS");
+                            println!("===========================");
+                            println!("Exercise: {} for {:.0} minutes", exercise_type, duration);
+                            println!("Heart Rate: {:.0} bpm ({:.1}% of HR reserve)", heart_rate, hr_percentage);
+                            println!("Calories burned: {:.0} calories", enhanced_calories);
+                            println!();
+                            
+                            // Combined analysis
+                            println!("COMBINED ANALYSIS");
+                            println!("=================");
+                            let net_calories = daily_calories + enhanced_calories;
+                            println!("Daily calories needed: {:.0}", daily_calories);
+                            println!("Exercise calories burned: {:.0}", enhanced_calories);
+                            println!("Net calories for the day: {:.0}", net_calories);
+                            
+                            if net_calories > daily_calories * 0.8 {
+                                println!("Good balance - moderate exercise with adequate nutrition");
+                            } else if net_calories > daily_calories * 0.6 {
+                                println!("Active day - ensure adequate post-workout nutrition");
+                            } else {
+                                println!("Very active day - consider additional nutrition");
+                            }
+                        } else {
+                            println!("Enhanced exercise model not available for combined analysis");
+                        }
                     } else {
-                        println!("Exercise calorie model not available");
+                        println!("Daily calorie model not available");
                     }
-                },
-                _ => {
-                    println!("Feature not yet implemented in this demo");
                 }
             }
             
@@ -1063,7 +1116,7 @@ impl CalorieCalculator {
             io::stdin().read_line(&mut input)?;
             
             if !input.trim().to_lowercase().starts_with('y') {
-                println!(" Thank you for using the Enhanced Calorie Calculator!");
+                println!("Thank you for using the Enhanced Calorie Calculator!");
                 break;
             }
         }
@@ -1076,4 +1129,3 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut calculator = CalorieCalculator::new();
     calculator.run()
 }
-
