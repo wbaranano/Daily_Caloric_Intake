@@ -883,6 +883,21 @@ impl CalorieCalculator {
                             if is_male { "Male" } else { "Female" }, age, height, weight);
                         println!("Exercise: {:.0} min, {:.0} bpm, {:.1}°C", duration, heart_rate, body_temp);
                         println!("Calories Burned: {:.0} calories", exercise_calories);
+                        
+                        let calories_per_hour = exercise_calories * (60.0 / duration);
+                        let calories_per_minute = exercise_calories / duration;
+                        
+                        println!("\nDETAILS:");
+                        println!("   Calories per minute: {:.1} cal/min", calories_per_minute);
+                        println!("   Calories per hour: {:.0} cal/hour", calories_per_hour);
+                        
+                        if exercise_calories > 500.0 {
+                            println!("   High intensity workout - excellent calorie burn!");
+                        } else if exercise_calories > 300.0 {
+                            println!("   Moderate workout - good calorie burn!");
+                        } else {
+                            println!("   Light workout - gentle calorie burn!");
+                        }
                     } else {
                         println!("Exercise calorie model not available");
                     }
@@ -956,25 +971,41 @@ impl CalorieCalculator {
                                 &exercise_type, resting_hr, max_hr, body_fat, env_temp, elevation
                             );
                             
-                            println!("EXERCISE ANALYSIS:");
+                            let hr_percentage = ((heart_rate - resting_hr) / (max_hr - resting_hr) * 100.0).clamp(0.0, 150.0);
+                            let calories_per_hour = enhanced_calories * (60.0 / duration);
+                            let calories_per_minute = enhanced_calories / duration;
+                            
+                            println!("EXERCISE ANALYSIS (XML-Trained Enhanced):");
                             println!("   Exercise: {} for {:.0} minutes", exercise_type, duration);
-                            println!("   Calories burned: {:.0} calories", enhanced_calories);
+                            println!("   Heart Rate: {:.0} bpm ({:.1}% intensity)", heart_rate, hr_percentage);
+                            println!("   Conditions: {:.1}°C ambient, {:.0}m elevation", env_temp, elevation);
+                            println!("   Body Fat: {:.1}%", body_fat);
+                            println!("   Calories burned: {:.0} calories ({:.1} cal/min)", enhanced_calories, calories_per_minute);
                             println!();
                             
-                            let net_calories = daily_calories - enhanced_calories;
                             println!("COMBINED ANALYSIS:");
                             println!("   Daily calories needed: {:.0}", daily_calories);
                             println!("   Exercise calories burned: {:.0}", enhanced_calories);
-                            println!("   Net calories for the day: {:.0}", net_calories);
                             
-                            if net_calories > daily_calories * 0.8 {
-                                println!("   Good balance - moderate exercise with adequate nutrition");
-                            } else if net_calories > daily_calories * 0.6 {
-                                println!("   Active day - ensure adequate post-workout nutrition");
-                            } else {
-                                println!("   Very active day - consider additional nutrition");
+                        } else {
+                            println!("Enhanced exercise model not available for comprehensive analysis");
+                            println!("Using basic exercise analysis instead...");
+                            
+                            // Fallback to basic exercise model if enhanced isn't available
+                            if let Some(ref basic_model) = self.exercise_model {
+                                let (duration, heart_rate, body_temp) = self.get_exercise_info()?;
+                                let exercise_calories = basic_model.predict_exercise_calories(
+                                    is_male, age, height, weight, duration, heart_rate, body_temp
+                                );
+                                
+                                println!("BASIC EXERCISE ANALYSIS:");
+                                println!("   Exercise: {:.0} min, {:.0} bpm, {:.1}°C", duration, heart_rate, body_temp);
+                                println!("   Calories burned: {:.0} calories", exercise_calories);
                             }
                         }
+                    } else {
+                        println!("Daily calorie model not available for comprehensive analysis");
+                        println!("Please ensure the embedded CSV data is properly loaded");
                     }
                 }
             }
@@ -1681,7 +1712,7 @@ impl CalorieCalculator {
             body_fat_percent, environmental_temp, elevation))
     }
     
-    fn run(&mut self, xml_path: Option<&str>) -> Result<(), Box<dyn Error>> {
+    fn run2(&mut self, xml_path: Option<&str>) -> Result<(), Box<dyn Error>> {
         println!("ENHANCED CALORIE CALCULATOR (XML-Trained)");
         println!("==========================================");
         
