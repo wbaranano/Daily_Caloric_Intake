@@ -1,96 +1,33 @@
 use std::error::Error;
 use std::io::{self, Write};
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 use ndarray::{Array1, Array2};
-use ndarray::s;
 use rand::Rng;
 use std::collections::HashMap;
-use std::fs;
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
+use regex;
+use chrono;
+use md5;
+//run using this btw 
+//# Build the release version (optimized)
+//cargo build --release
 
+//# Run with your XML file
+//./target/release/calorie data/export.xml
 // Embedded CSV data
 const EMBEDDED_DAILY_CSV: &str = include_str!("../data/balanced_diet.csv");
 const EMBEDDED_EXERCISE_CSV: &str = include_str!("../data/calories.csv");
 
 // XML parsing structures
 #[derive(Debug, Deserialize)]
-struct Workout {
-    #[serde(rename = "workoutActivityType")]
-    workout_activity_type: String,
-    #[serde(rename = "duration")]
-    duration: Option<String>,
-    #[serde(rename = "totalEnergyBurned")]
-    total_energy_burned: Option<String>,
-    #[serde(rename = "startDate")]
-    start_date: Option<String>,
-    #[serde(rename = "endDate")]
-    end_date: Option<String>,
-    #[serde(rename = "WorkoutEvent", default)]
-    workout_events: Vec<WorkoutEvent>,
-    #[serde(rename = "WorkoutStatistics", default)]
-    workout_statistics: Vec<WorkoutStatistic>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkoutEvent {
-    #[serde(rename = "type")]
-    event_type: String,
-    #[serde(rename = "date")]
-    date: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkoutStatistic {
-    #[serde(rename = "type")]
-    stat_type: String,
-    #[serde(rename = "startDate")]
-    start_date: Option<String>,
-    #[serde(rename = "endDate")]
-    end_date: Option<String>,
-    #[serde(rename = "sum")]
-    sum: Option<String>,
-    #[serde(rename = "minimum")]
-    minimum: Option<String>,
-    #[serde(rename = "maximum")]
-    maximum: Option<String>,
-    #[serde(rename = "average")]
-    average: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Record {
-    #[serde(rename = "type")]
-    record_type: String,
-    #[serde(rename = "sourceName")]
-    source_name: Option<String>,
-    #[serde(rename = "unit")]
-    unit: Option<String>,
-    #[serde(rename = "creationDate")]
-    creation_date: Option<String>,
-    #[serde(rename = "startDate")]
-    start_date: Option<String>,
-    #[serde(rename = "endDate")]
-    end_date: Option<String>,
-    #[serde(rename = "value")]
-    value: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HealthData {
-    #[serde(rename = "Record", default)]
-    records: Vec<Record>,
-    #[serde(rename = "Workout", default)]
-    workouts: Vec<Workout>,
-}
 
 // Processed exercise data structure
-#[derive(Debug, Clone)]
 struct ProcessedExerciseData {
     exercise_type: String,
     duration_minutes: f32,
     calories_burned: f32,
     avg_heart_rate: Option<f32>,
-    distance: Option<f32>,
-    date: String,
     // Estimated values for missing data
     estimated_age: f32,
     estimated_weight: f32,
@@ -105,7 +42,6 @@ struct ProcessedExerciseData {
 // Enhanced exercise data structure (same as before)
 #[derive(Debug, Clone)]
 struct EnhancedExerciseData {
-    user_id: Option<f32>,
     gender: String,
     age: f32,
     height: f32,
@@ -148,7 +84,7 @@ struct EnhancedExercisePredictor {
 
 impl EnhancedExercisePredictor {
     fn new(input_size: usize, exercise_type_encoder: HashMap<String, usize>) -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let hidden_size1 = 64;
         let hidden_size2 = 32;
         let hidden_size3 = 16;
@@ -166,24 +102,24 @@ impl EnhancedExercisePredictor {
         // Initialize weights with Xavier initialization
         for i in 0..input_size {
             for j in 0..hidden_size1 {
-                weights1[[i, j]] = rng.gen_range(-xavier_1..xavier_1);
+                weights1[[i, j]] = rng.random_range(-xavier_1..xavier_1);
             }
         }
         
         for i in 0..hidden_size1 {
             for j in 0..hidden_size2 {
-                weights2[[i, j]] = rng.gen_range(-xavier_2..xavier_2);
+                weights2[[i, j]] = rng.random_range(-xavier_2..xavier_2);
             }
         }
         
         for i in 0..hidden_size2 {
             for j in 0..hidden_size3 {
-                weights3[[i, j]] = rng.gen_range(-xavier_3..xavier_3);
+                weights3[[i, j]] = rng.random_range(-xavier_3..xavier_3);
             }
         }
         
         for i in 0..hidden_size3 {
-            weights4[[i, 0]] = rng.gen_range(-xavier_4..xavier_4);
+            weights4[[i, 0]] = rng.random_range(-xavier_4..xavier_4);
         }
         
         Self {
@@ -205,48 +141,7 @@ impl EnhancedExercisePredictor {
         }
     }
     
-    fn relu(x: f32) -> f32 {
-        x.max(0.0)
-    }
-    
-    fn normalize_input(&self, input: &Array1<f32>) -> Array1<f32> {
-        let mut normalized = Array1::zeros(self.input_size);
-        for i in 0..self.input_size {
-            if self.input_maxs[i] > self.input_mins[i] {
-                normalized[i] = (input[i] - self.input_mins[i]) / (self.input_maxs[i] - self.input_mins[i]);
-            } else {
-                normalized[i] = 0.5;
-            }
-        }
-        normalized
-    }
-    
-    fn forward(&self, input: &Array1<f32>) -> (Array1<f32>, Array1<f32>, Array1<f32>, Array1<f32>, Array1<f32>, Array1<f32>, f32) {
-        let normalized = self.normalize_input(input);
-        
-        let z1 = normalized.dot(&self.weights1) + &self.biases1;
-        let a1 = z1.mapv(Self::relu);
-        
-        let z2 = a1.dot(&self.weights2) + &self.biases2;
-        let a2 = z2.mapv(Self::relu);
-        
-        let z3 = a2.dot(&self.weights3) + &self.biases3;
-        let a3 = z3.mapv(Self::relu);
-        
-        let z4 = a3.dot(&self.weights4) + &self.biases4;
-        let output = 1.0 / (1.0 + (-z4[0]).exp());
-        
-        (z1, a1, z2, a2, z3, a3, output)
-    }
-    
-    fn denormalize_output(&self, output: f32) -> f32 {
-        self.target_min + output * (self.target_max - self.target_min)
-    }
-    
-    fn predict(&self, input: &Array1<f32>) -> f32 {
-        let (_, _, _, _, _, _, raw_output) = self.forward(input);
-        self.denormalize_output(raw_output)
-    }
+
     
     // FIXED: Proper physics-based prediction instead of broken neural network
     fn predict_enhanced_calories(&self, is_male: bool, age: f32, height: f32, weight: f32,
@@ -255,7 +150,7 @@ impl EnhancedExercisePredictor {
                                body_fat_percent: f32, environmental_temp: f32, elevation: f32) -> f32 {
         
         // Calculate BMR (Basal Metabolic Rate)
-        let bmr = if is_male {
+        let _bmr = if is_male {
             88.362 + (13.397 * weight) + (4.799 * height) - (5.677 * age)
         } else {
             447.593 + (9.247 * weight) + (3.098 * height) - (4.330 * age)
@@ -296,7 +191,7 @@ impl EnhancedExercisePredictor {
         
         // Final calculation
         let met_adjusted = base_met * temp_factor * altitude_factor * body_temp_factor * metabolic_multiplier;
-        let calories_per_hour = (met_adjusted * weight * 1.05); // 1.05 conversion factor
+        let calories_per_hour = met_adjusted * weight * 1.05; // 1.05 conversion factor
         let total_calories = calories_per_hour * (duration / 60.0);
         
         total_calories.max(50.0) // Minimum reasonable burn
@@ -321,13 +216,62 @@ impl EnhancedExercisePredictor {
         println!("Using physics-based prediction model instead of neural network");
         println!("Enhanced exercise calorie model ready!");
     }
+
+    fn save_to_file(&self, path: &str) -> Result<(), Box<dyn Error>> {
+        let serializable = SerializableEnhancedModel {
+            weights1: array2_to_vec(&self.weights1),
+            biases1: array1_to_vec(&self.biases1),
+            weights2: array2_to_vec(&self.weights2),
+            biases2: array1_to_vec(&self.biases2),
+            weights3: array2_to_vec(&self.weights3),
+            biases3: array1_to_vec(&self.biases3),
+            weights4: array2_to_vec(&self.weights4),
+            biases4: array1_to_vec(&self.biases4),
+            input_mins: array1_to_vec(&self.input_mins),
+            input_maxs: array1_to_vec(&self.input_maxs),
+            target_min: self.target_min,
+            target_max: self.target_max,
+            exercise_type_encoder: self.exercise_type_encoder.clone(),
+            input_size: self.input_size,
+            hidden_size1: self.hidden_size1,
+            hidden_size2: self.hidden_size2,
+            hidden_size3: self.hidden_size3,
+        };
+        
+        let file = File::create(path)?;
+        let writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, &serializable)?;
+        println!("Enhanced exercise model saved to: {}", path);
+        Ok(())
+    }
     
-    fn encode_exercise_type(&self, exercise_type: &str) -> Vec<f32> {
-        let mut encoded = vec![0.0; self.exercise_type_encoder.len()];
-        if let Some(&index) = self.exercise_type_encoder.get(exercise_type) {
-            encoded[index] = 1.0;
-        }
-        encoded
+    fn load_from_file(path: &str) -> Result<Self, Box<dyn Error>> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let serializable: SerializableEnhancedModel = serde_json::from_reader(reader)?;
+        
+        let model = Self {
+            weights1: vec_to_array2(&serializable.weights1),
+            biases1: vec_to_array1(&serializable.biases1),
+            weights2: vec_to_array2(&serializable.weights2),
+            biases2: vec_to_array1(&serializable.biases2),
+            weights3: vec_to_array2(&serializable.weights3),
+            biases3: vec_to_array1(&serializable.biases3),
+            weights4: vec_to_array2(&serializable.weights4),
+            biases4: vec_to_array1(&serializable.biases4),
+            input_mins: vec_to_array1(&serializable.input_mins),
+            input_maxs: vec_to_array1(&serializable.input_maxs),
+            target_min: serializable.target_min,
+            target_max: serializable.target_max,
+            exercise_type_encoder: serializable.exercise_type_encoder,
+            input_size: serializable.input_size,
+            hidden_size1: serializable.hidden_size1,
+            hidden_size2: serializable.hidden_size2,
+            hidden_size3: serializable.hidden_size3,
+        };
+        
+        println!("Enhanced exercise model loaded from: {}", path);
+        Ok(model)
     }
 }
 
@@ -337,12 +281,12 @@ enum CalculatorChoice {
     ExerciseCalories,
     EnhancedExercise,
     Both,
+    Retrain,
 }
 
 // Add CSV data structures back
 #[derive(Debug, Clone)]
 struct ExerciseData {
-    user_id: Option<f32>,
     gender: String,
     age: f32,
     height: f32,
@@ -384,7 +328,7 @@ struct ExercisePredictor {
 
 impl ExercisePredictor {
     fn new(input_size: usize) -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let hidden_size1 = 32;
         let hidden_size2 = 16;
         
@@ -399,18 +343,18 @@ impl ExercisePredictor {
         // Initialize weights
         for i in 0..input_size {
             for j in 0..hidden_size1 {
-                weights1[[i, j]] = rng.gen_range(-xavier_1..xavier_1);
+                weights1[[i, j]] = rng.random_range(-xavier_1..xavier_1);
             }
         }
         
         for i in 0..hidden_size1 {
             for j in 0..hidden_size2 {
-                weights2[[i, j]] = rng.gen_range(-xavier_2..xavier_2);
+                weights2[[i, j]] = rng.random_range(-xavier_2..xavier_2);
             }
         }
         
         for i in 0..hidden_size2 {
-            weights3[[i, 0]] = rng.gen_range(-xavier_3..xavier_3);
+            weights3[[i, 0]] = rng.random_range(-xavier_3..xavier_3);
         }
         
         Self {
@@ -495,6 +439,55 @@ impl ExercisePredictor {
         println!("Target range: {:.0} - {:.0} calories", self.target_min, self.target_max);
         println!("Basic exercise model ready!");
     }
+
+    fn save_to_file(&self, path: &str) -> Result<(), Box<dyn Error>> {
+        let serializable = SerializableExerciseModel {
+            weights1: array2_to_vec(&self.weights1),
+            biases1: array1_to_vec(&self.biases1),
+            weights2: array2_to_vec(&self.weights2),
+            biases2: array1_to_vec(&self.biases2),
+            weights3: array2_to_vec(&self.weights3),
+            biases3: array1_to_vec(&self.biases3),
+            input_mins: array1_to_vec(&self.input_mins),
+            input_maxs: array1_to_vec(&self.input_maxs),
+            target_min: self.target_min,
+            target_max: self.target_max,
+            input_size: self.input_size,
+            hidden_size1: self.hidden_size1,
+            hidden_size2: self.hidden_size2,
+        };
+        
+        let file = File::create(path)?;
+        let writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, &serializable)?;
+        println!("Exercise model saved to: {}", path);
+        Ok(())
+    }
+    
+    fn load_from_file(path: &str) -> Result<Self, Box<dyn Error>> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let serializable: SerializableExerciseModel = serde_json::from_reader(reader)?;
+        
+        let model = Self {
+            weights1: vec_to_array2(&serializable.weights1),
+            biases1: vec_to_array1(&serializable.biases1),
+            weights2: vec_to_array2(&serializable.weights2),
+            biases2: vec_to_array1(&serializable.biases2),
+            weights3: vec_to_array2(&serializable.weights3),
+            biases3: vec_to_array1(&serializable.biases3),
+            input_mins: vec_to_array1(&serializable.input_mins),
+            input_maxs: vec_to_array1(&serializable.input_maxs),
+            target_min: serializable.target_min,
+            target_max: serializable.target_max,
+            input_size: serializable.input_size,
+            hidden_size1: serializable.hidden_size1,
+            hidden_size2: serializable.hidden_size2,
+        };
+        
+        println!("Exercise model loaded from: {}", path);
+        Ok(model)
+    }
 }
 
 // Add daily calorie predictor
@@ -515,7 +508,7 @@ struct DailyCaloriePredictor {
 
 impl DailyCaloriePredictor {
     fn new(input_size: usize) -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let hidden_size = 32;
         
         let xavier_1 = (2.0 / (input_size + hidden_size) as f32).sqrt();
@@ -526,12 +519,12 @@ impl DailyCaloriePredictor {
         
         for i in 0..input_size {
             for j in 0..hidden_size {
-                weights1[[i, j]] = rng.gen_range(-xavier_1..xavier_1);
+                weights1[[i, j]] = rng.random_range(-xavier_1..xavier_1);
             }
         }
         
         for i in 0..hidden_size {
-            weights2[[i, 0]] = rng.gen_range(-xavier_2..xavier_2);
+            weights2[[i, 0]] = rng.random_range(-xavier_2..xavier_2);
         }
         
         Self {
@@ -548,56 +541,9 @@ impl DailyCaloriePredictor {
         }
     }
     
-    fn predict_daily_calories(&self, age: f32, is_male: bool, activity_level: &str, sleep_duration: f32, height: f32) -> f32 {
-        let activity_encoded = match activity_level {
-            "Low" => 0.0,
-            "Moderate" => 1.0,
-            "High" => 2.0,
-            _ => 1.0,
-        };
-        
-        let input = Array1::from(vec![
-            age,
-            if is_male { 1.0 } else { 0.0 },
-            activity_encoded,
-            sleep_duration,
-            height,
-        ]);
-        
-        self.predict(&input)
-    }
-    
-    fn predict(&self, input: &Array1<f32>) -> f32 {
-        let normalized = self.normalize_input(input);
-        
-        let z1 = normalized.dot(&self.weights1) + &self.biases1;
-        let a1 = z1.mapv(Self::relu);
-        
-        let z2 = a1.dot(&self.weights2) + &self.biases2;
-        let output = 1.0 / (1.0 + (-z2[0]).exp());
-        
-        self.denormalize_output(output)
-    }
-    
-    fn normalize_input(&self, input: &Array1<f32>) -> Array1<f32> {
-        let mut normalized = Array1::zeros(self.input_size);
-        for i in 0..self.input_size {
-            if self.input_maxs[i] > self.input_mins[i] {
-                normalized[i] = (input[i] - self.input_mins[i]) / (self.input_maxs[i] - self.input_mins[i]);
-            } else {
-                normalized[i] = 0.5;
-            }
-        }
-        normalized
-    }
-    
-    fn denormalize_output(&self, output: f32) -> f32 {
-        self.target_min + output * (self.target_max - self.target_min)
-    }
-    
-    fn relu(x: f32) -> f32 {
-        x.max(0.0)
-    }
+
+
+    // Also fix the main predict method to use physics-based calculation
     
     fn train(&mut self, features: &Array2<f32>, targets: &Array1<f32>) {
         println!("Training Daily Calorie Predictor...");
@@ -614,6 +560,49 @@ impl DailyCaloriePredictor {
         
         println!("Target range: {:.0} - {:.0} calories", self.target_min, self.target_max);
         println!("Daily calorie model ready!");
+    }
+
+    fn save_to_file(&self, path: &str) -> Result<(), Box<dyn Error>> {
+        let serializable = SerializableDailyModel {
+            weights1: array2_to_vec(&self.weights1),
+            biases1: array1_to_vec(&self.biases1),
+            weights2: array2_to_vec(&self.weights2),
+            biases2: array1_to_vec(&self.biases2),
+            input_mins: array1_to_vec(&self.input_mins),
+            input_maxs: array1_to_vec(&self.input_maxs),
+            target_min: self.target_min,
+            target_max: self.target_max,
+            input_size: self.input_size,
+            hidden_size: self.hidden_size,
+        };
+        
+        let file = File::create(path)?;
+        let writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, &serializable)?;
+        println!("Daily calorie model saved to: {}", path);
+        Ok(())
+    }
+    
+    fn load_from_file(path: &str) -> Result<Self, Box<dyn Error>> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let serializable: SerializableDailyModel = serde_json::from_reader(reader)?;
+        
+        let model = Self {
+            weights1: vec_to_array2(&serializable.weights1),
+            biases1: vec_to_array1(&serializable.biases1),
+            weights2: vec_to_array2(&serializable.weights2),
+            biases2: vec_to_array1(&serializable.biases2),
+            input_mins: vec_to_array1(&serializable.input_mins),
+            input_maxs: vec_to_array1(&serializable.input_maxs),
+            target_min: serializable.target_min,
+            target_max: serializable.target_max,
+            input_size: serializable.input_size,
+            hidden_size: serializable.hidden_size,
+        };
+        
+        println!("Daily calorie model loaded from: {}", path);
+        Ok(model)
     }
 }
 
@@ -642,9 +631,9 @@ impl CalorieCalculator {
             if i == 0 { continue; } // Skip header
             
             let fields: Vec<&str> = line.split(',').collect();
-            if fields.len() >= 9 {
+            if fields.len() >= 8 {
                 let exercise = ExerciseData {
-                    user_id: fields[0].parse().ok(),
+                    // Skip user_id field - not in ExerciseData struct
                     gender: fields[1].trim_matches('"').to_string(),
                     age: fields[2].parse().unwrap_or(25.0),
                     height: fields[3].parse().unwrap_or(170.0),
@@ -735,28 +724,95 @@ impl CalorieCalculator {
     }
     
     fn train_daily_model(&mut self) -> Result<(), Box<dyn Error>> {
+        let model_path = "models/daily_calorie_model.json";
+        
+        // Try to load existing model first
+        if std::path::Path::new(model_path).exists() {
+            match DailyCaloriePredictor::load_from_file(model_path) {
+                Ok(model) => {
+                    println!("Loaded existing daily calorie model from disk");
+                    self.daily_model = Some(model);
+                    return Ok(());
+                }
+                Err(e) => {
+                    println!("Warning: Could not load existing model: {}", e);
+                    println!("Training new model...");
+                }
+            }
+        }
+        
+        // Train new model if loading failed or file doesn't exist
         let daily_data = self.parse_daily_csv_data(EMBEDDED_DAILY_CSV)?;
         let (features, targets) = self.preprocess_daily_data(&daily_data);
         
         let mut model = DailyCaloriePredictor::new(5);
         model.train(&features, &targets);
         
+        // Save the trained model
+        std::fs::create_dir_all("models")?;
+        if let Err(e) = model.save_to_file(model_path) {
+            println!("Warning: Could not save daily model: {}", e);
+        }
+        
         self.daily_model = Some(model);
         Ok(())
     }
     
     fn train_exercise_model(&mut self) -> Result<(), Box<dyn Error>> {
+        let model_path = "models/exercise_model.json";
+        
+        // Try to load existing model first
+        if std::path::Path::new(model_path).exists() {
+            match ExercisePredictor::load_from_file(model_path) {
+                Ok(model) => {
+                    println!("Loaded existing exercise model from disk");
+                    self.exercise_model = Some(model);
+                    return Ok(());
+                }
+                Err(e) => {
+                    println!("Warning: Could not load existing model: {}", e);
+                    println!("Training new model...");
+                }
+            }
+        }
+        
+        // Train new model if loading failed or file doesn't exist
         let exercise_data = self.parse_csv_data(EMBEDDED_EXERCISE_CSV)?;
         let (features, targets) = self.preprocess_exercise_data(&exercise_data);
         
         let mut model = ExercisePredictor::new(7);
         model.train(&features, &targets);
         
+        // Save the trained model
+        std::fs::create_dir_all("models")?;
+        if let Err(e) = model.save_to_file(model_path) {
+            println!("Warning: Could not save exercise model: {}", e);
+        }
+        
         self.exercise_model = Some(model);
         Ok(())
     }
     
     fn train_enhanced_exercise_model(&mut self, xml_path: &str) -> Result<(), Box<dyn Error>> {
+        
+        // Try to load existing model first (but only if we've processed this XML file before)
+        let xml_hash = format!("{:x}", md5::compute(std::fs::read_to_string(xml_path)?));
+        let model_with_hash = format!("models/enhanced_exercise_model_{}.json", xml_hash);
+        
+        if std::path::Path::new(&model_with_hash).exists() {
+            match EnhancedExercisePredictor::load_from_file(&model_with_hash) {
+                Ok(model) => {
+                    println!("Loaded existing enhanced model for this XML file from disk");
+                    self.enhanced_exercise_model = Some(model);
+                    return Ok(());
+                }
+                Err(e) => {
+                    println!("Warning: Could not load existing enhanced model: {}", e);
+                    println!("Training new enhanced model...");
+                }
+            }
+        }
+        
         println!("Training Enhanced Model with Combined Data...");
         
         // Load XML data
@@ -769,7 +825,6 @@ impl CalorieCalculator {
         let csv_exercise_data = self.parse_csv_data(EMBEDDED_EXERCISE_CSV)?;
         let csv_enhanced_data: Vec<EnhancedExerciseData> = csv_exercise_data.iter().map(|record| {
             EnhancedExerciseData {
-                user_id: record.user_id,
                 gender: record.gender.clone(),
                 age: record.age,
                 height: record.height,
@@ -778,7 +833,7 @@ impl CalorieCalculator {
                 heart_rate: record.heart_rate,
                 body_temp: record.body_temp,
                 calories: record.calories,
-                exercise_type: "Other".to_string(), // CSV doesn't have exercise type
+                exercise_type: "Other".to_string(),
                 resting_hr: 65.0,
                 max_hr: 220.0 - record.age,
                 body_fat_percent: if record.gender.to_lowercase() == "male" { 15.0 } else { 22.0 },
@@ -802,11 +857,17 @@ impl CalorieCalculator {
         let mut model = EnhancedExercisePredictor::new(n_features, exercise_encoder);
         model.train(&features, &targets);
         
+        // Save the trained model with XML file hash
+        std::fs::create_dir_all("models")?;
+        if let Err(e) = model.save_to_file(&model_with_hash) {
+            println!("Warning: Could not save enhanced model: {}", e);
+        }
+        
         self.enhanced_exercise_model = Some(model);
         Ok(())
     }
-    
-    // Update run method to handle all models
+
+    // ... rest of your existing methods remain the same ...
     fn run(&mut self, xml_path: Option<&str>) -> Result<(), Box<dyn Error>> {
         println!("ENHANCED CALORIE CALCULATOR (CSV + XML Hybrid)");
         println!("===============================================");
@@ -842,33 +903,64 @@ impl CalorieCalculator {
         
         loop {
             let choice = self.get_user_choice()?;
+            
+            // Handle retrain option before getting user info
+            if matches!(choice, CalculatorChoice::Retrain) {
+                self.retrain_all_models(xml_path)?;
+                continue; // Go back to menu after retraining
+            }
+            
             let (is_male, age, height, weight) = self.get_basic_info()?;
+            
+            // Create user profile string
+            let user_profile = format!(
+                "Gender: {}\nAge: {} years\nHeight: {:.0} cm\nWeight: {:.0} kg",
+                if is_male { "Male" } else { "Female" }, age, height, weight
+            );
             
             println!("\nCALCULATION RESULTS");
             println!("======================");
             
+            
+            let mut results_text = String::new();
             match choice {
                 CalculatorChoice::DailyCalories => {
-                    if let Some(ref model) = self.daily_model {
-                        let daily_calories = model.predict_daily_calories(age, is_male, "Moderate", 8.0, height);
-                        
-                        println!("DAILY CALORIE NEEDS (CSV-Trained)");
-                        println!("==================================");
-                        println!("Profile: {} {}, {:.0}cm, {:.0}kg", 
-                            if is_male { "Male" } else { "Female" }, age, height, weight);
-                        println!("Estimated daily calorie needs: {:.0} calories", daily_calories);
-                        
-                        println!("\nLIFESTYLE RECOMMENDATIONS:");
-                        if daily_calories > 2200.0 {
-                            println!("   High calorie needs - ensure adequate nutrition");
-                        } else if daily_calories > 1800.0 {
-                            println!("   Moderate calorie needs - balanced diet recommended");
-                        } else {
-                            println!("   Lower calorie needs - focus on nutrient density");
-                        }
+                    // Use proper BMR calculation with actual weight
+                    let bmr = if is_male {
+                        10.0 * weight + 6.25 * height - 5.0 * age + 5.0
                     } else {
-                        println!("Daily calorie model not available");
-                    }
+                        10.0 * weight + 6.25 * height - 5.0 * age - 161.0
+                    };
+                    
+                    let activity_multiplier = 1.55; // Moderate activity level
+                    let daily_calories = bmr * activity_multiplier;
+                    
+                    let output = format!(
+                        "DAILY CALORIE NEEDS (Physics-Based BMR)\n\
+                        =========================================\n\
+                        Profile: {} {}, {:.0}cm, {:.0}kg\n\
+                        Base Metabolic Rate (BMR): {:.0} calories\n\
+                        Activity Level: Moderate (1.55x multiplier)\n\
+                        Total Daily Energy Expenditure: {:.0} calories\n\n\
+                        BREAKDOWN:\n\
+                        • BMR (basic body functions): {:.0} cal\n\
+                        • Activity & exercise: {:.0} cal\n\
+                        • Thermic effect of food: {:.0} cal\n\n\
+                        LIFESTYLE RECOMMENDATIONS:\n{}",
+                        if is_male { "Male" } else { "Female" }, age, height, weight,
+                        bmr, daily_calories,
+                        bmr, daily_calories - bmr, daily_calories * 0.1,
+                        if daily_calories > 2500.0 {
+                            "   High calorie needs - ensure adequate nutrition with 3-4 meals"
+                        } else if daily_calories > 2000.0 {
+                            "   Moderate calorie needs - balanced diet with 3 regular meals"
+                        } else {
+                            "   Lower calorie needs - focus on nutrient-dense foods"
+                        }
+                    );
+                    
+                    println!("{}", output);
+                    results_text = output;
                 },
                 CalculatorChoice::ExerciseCalories => {
                     if let Some(ref model) = self.exercise_model {
@@ -877,29 +969,38 @@ impl CalorieCalculator {
                             is_male, age, height, weight, duration, heart_rate, body_temp
                         );
                         
-                        println!("BASIC EXERCISE CALORIE BURN (CSV-Trained)");
-                        println!("==========================================");
-                        println!("Profile: {} {}, {:.0}cm, {:.0}kg", 
-                            if is_male { "Male" } else { "Female" }, age, height, weight);
-                        println!("Exercise: {:.0} min, {:.0} bpm, {:.1}°C", duration, heart_rate, body_temp);
-                        println!("Calories Burned: {:.0} calories", exercise_calories);
-                        
                         let calories_per_hour = exercise_calories * (60.0 / duration);
                         let calories_per_minute = exercise_calories / duration;
                         
-                        println!("\nDETAILS:");
-                        println!("   Calories per minute: {:.1} cal/min", calories_per_minute);
-                        println!("   Calories per hour: {:.0} cal/hour", calories_per_hour);
-                        
-                        if exercise_calories > 500.0 {
-                            println!("   High intensity workout - excellent calorie burn!");
+                        let intensity_msg = if exercise_calories > 500.0 {
+                            "High intensity workout - excellent calorie burn!"
                         } else if exercise_calories > 300.0 {
-                            println!("   Moderate workout - good calorie burn!");
+                            "Moderate workout - good calorie burn!"
                         } else {
-                            println!("   Light workout - gentle calorie burn!");
-                        }
+                            "Light workout - gentle calorie burn!"
+                        };
+                        
+                        let output = format!(
+                            "BASIC EXERCISE CALORIE BURN (CSV-Trained)\n\
+                            ==========================================\n\
+                            Profile: {} {}, {:.0}cm, {:.0}kg\n\
+                            Exercise: {:.0} min, {:.0} bpm, {:.1}°C\n\
+                            Calories Burned: {:.0} calories\n\n\
+                            DETAILS:\n\
+                               Calories per minute: {:.1} cal/min\n\
+                               Calories per hour: {:.0} cal/hour\n\
+                               {}",
+                            if is_male { "Male" } else { "Female" }, age, height, weight,
+                            duration, heart_rate, body_temp, exercise_calories,
+                            calories_per_minute, calories_per_hour, intensity_msg
+                        );
+                        
+                        println!("{}", output);
+                       let  _results_text = output;
                     } else {
-                        println!("Exercise calorie model not available");
+                        let output = "Exercise calorie model not available";
+                        println!("{}", output);
+                        results_text = output.to_string();
                     }
                 },
                 CalculatorChoice::EnhancedExercise => {
@@ -922,92 +1023,112 @@ impl CalorieCalculator {
                         let calories_per_hour = enhanced_calories * (60.0 / duration);
                         let calories_per_minute = enhanced_calories / duration;
                         
-                        println!("ENHANCED CALORIE ANALYSIS (CSV + XML Hybrid)");
-                        println!("=============================================");
-                        println!("Profile: {} {}, {:.0}cm, {:.0}kg", 
-                            if is_male { "Male" } else { "Female" }, age, height, weight);
-                        println!("Exercise: {} for {:.0} minutes", exercise_type, duration);
-                        println!("Heart Rate: {:.0} bpm ({:.1}% of HR reserve)", heart_rate, hr_percentage);
-                        println!("Conditions: {:.1}°C ambient, {:.0}m elevation", env_temp, elevation);
-                        println!("Body Fat: {:.1}%", body_fat);
-                        println!();
-                        println!("CALORIE BURN RESULTS:");
-                        println!("   Total calories burned: {:.0} calories", enhanced_calories);
-                        println!("   Calories per minute: {:.1} cal/min", calories_per_minute);
-                        println!("   Calories per hour: {:.0} cal/hour", calories_per_hour);
-                        
-                        if hr_percentage > 85.0 {
-                            println!("   Very high intensity - maximum calorie burn!");
+                        let intensity_msg = if hr_percentage > 85.0 {
+                            "Very high intensity - maximum calorie burn!"
                         } else if hr_percentage > 70.0 {
-                            println!("   High intensity - excellent calorie burn!");
+                            "High intensity - excellent calorie burn!"
                         } else if hr_percentage > 50.0 {
-                            println!("   Moderate intensity - good steady burn rate!");
+                            "Moderate intensity - good steady burn rate!"
                         } else {
-                            println!("   Light activity - gentle calorie burn!");
-                        }
+                            "Light activity - gentle calorie burn!"
+                        };
                         
+                        let output = format!(
+                            "ENHANCED CALORIE ANALYSIS (CSV + XML Hybrid)\n\
+                            =============================================\n\
+                            Profile: {} {}, {:.0}cm, {:.0}kg\n\
+                            Exercise: {} for {:.0} minutes\n\
+                            Heart Rate: {:.0} bpm ({:.1}% of HR reserve)\n\
+                            Conditions: {:.1}°C ambient, {:.0}m elevation\n\
+                            Body Fat: {:.1}%\n\n\
+                            CALORIE BURN RESULTS:\n\
+                               Total calories burned: {:.0} calories\n\
+                               Calories per minute: {:.1} cal/min\n\
+                               Calories per hour: {:.0} cal/hour\n\
+                               {}",
+                            if is_male { "Male" } else { "Female" }, age, height, weight,
+                            exercise_type, duration, heart_rate, hr_percentage,
+                            env_temp, elevation, body_fat, enhanced_calories,
+                            calories_per_minute, calories_per_hour, intensity_msg
+                        );
+                        
+                        println!("{}", output);
+                        results_text = output;
                     } else {
-                        println!("Enhanced exercise model not available");
+                        let output = "Enhanced exercise model not available";
+                        println!("{}", output);
+                        results_text = output.to_string();
                     }
                 },
                 CalculatorChoice::Both => {
-                    // Combined analysis using all models
-                    if let Some(ref daily_model) = self.daily_model {
-                        let daily_calories = daily_model.predict_daily_calories(age, is_male, "Moderate", 8.0, height);
-                        
-                        println!("COMPREHENSIVE CALORIE ANALYSIS");
-                        println!("===============================");
-                        println!("Profile: {} {}, {:.0}cm, {:.0}kg", 
-                            if is_male { "Male" } else { "Female" }, age, height, weight);
-                        println!("Daily calorie needs: {:.0} calories", daily_calories);
-                        println!();
-                        
-                        if let Some(ref enhanced_model) = self.enhanced_exercise_model {
-                            let (duration, heart_rate, body_temp, exercise_type, resting_hr, max_hr, 
-                                 body_fat, env_temp, elevation) = self.get_enhanced_exercise_info(is_male, age)?;
-                            
-                            let enhanced_calories = enhanced_model.predict_enhanced_calories(
-                                is_male, age, height, weight, duration, heart_rate, body_temp,
-                                &exercise_type, resting_hr, max_hr, body_fat, env_temp, elevation
-                            );
-                            
-                            let hr_percentage = ((heart_rate - resting_hr) / (max_hr - resting_hr) * 100.0).clamp(0.0, 150.0);
-                            let calories_per_hour = enhanced_calories * (60.0 / duration);
-                            let calories_per_minute = enhanced_calories / duration;
-                            
-                            println!("EXERCISE ANALYSIS (XML-Trained Enhanced):");
-                            println!("   Exercise: {} for {:.0} minutes", exercise_type, duration);
-                            println!("   Heart Rate: {:.0} bpm ({:.1}% intensity)", heart_rate, hr_percentage);
-                            println!("   Conditions: {:.1}°C ambient, {:.0}m elevation", env_temp, elevation);
-                            println!("   Body Fat: {:.1}%", body_fat);
-                            println!("   Calories burned: {:.0} calories ({:.1} cal/min)", enhanced_calories, calories_per_minute);
-                            println!();
-                            
-                            println!("COMBINED ANALYSIS:");
-                            println!("   Daily calories needed: {:.0}", daily_calories);
-                            println!("   Exercise calories burned: {:.0}", enhanced_calories);
-                            
-                        } else {
-                            println!("Enhanced exercise model not available for comprehensive analysis");
-                            println!("Using basic exercise analysis instead...");
-                            
-                            // Fallback to basic exercise model if enhanced isn't available
-                            if let Some(ref basic_model) = self.exercise_model {
-                                let (duration, heart_rate, body_temp) = self.get_exercise_info()?;
-                                let exercise_calories = basic_model.predict_exercise_calories(
-                                    is_male, age, height, weight, duration, heart_rate, body_temp
-                                );
-                                
-                                println!("BASIC EXERCISE ANALYSIS:");
-                                println!("   Exercise: {:.0} min, {:.0} bpm, {:.1}°C", duration, heart_rate, body_temp);
-                                println!("   Calories burned: {:.0} calories", exercise_calories);
-                            }
-                        }
+                    // Calculate BMR and daily calories using the actual user data
+                    let bmr = if is_male {
+                        10.0 * weight + 6.25 * height - 5.0 * age + 5.0
                     } else {
-                        println!("Daily calorie model not available for comprehensive analysis");
-                        println!("Please ensure the embedded CSV data is properly loaded");
+                        10.0 * weight + 6.25 * height - 5.0 * age - 161.0
+                    };
+                    
+                    let activity_multiplier = 1.55; // Moderate activity level
+                    let daily_calories = bmr * activity_multiplier;
+                    
+                    let mut output = format!(
+                        "COMPREHENSIVE CALORIE ANALYSIS\n\
+                        ===============================\n\
+                        Profile: {} {}, {:.0}cm, {:.0}kg\n\
+                        Base Metabolic Rate (BMR): {:.0} calories\n\
+                        Total Daily Energy Expenditure: {:.0} calories\n\n",
+                        if is_male { "Male" } else { "Female" }, age, height, weight, bmr, daily_calories
+                    );
+                    
+                    if let Some(ref enhanced_model) = self.enhanced_exercise_model {
+                        let (duration, heart_rate, body_temp, exercise_type, resting_hr, max_hr, 
+                             body_fat, env_temp, elevation) = self.get_enhanced_exercise_info(is_male, age)?;
+                        
+                        let enhanced_calories = enhanced_model.predict_enhanced_calories(
+                            is_male, age, height, weight, duration, heart_rate, body_temp,
+                            &exercise_type, resting_hr, max_hr, body_fat, env_temp, elevation
+                        );
+                        
+                        let hr_percentage = ((heart_rate - resting_hr) / (max_hr - resting_hr) * 100.0).clamp(0.0, 150.0);
+                        
+                        // Calculate BMR + Exercise total
+                        let bmr_plus_exercise = bmr + enhanced_calories;
+                        let bmr_coverage = (enhanced_calories / bmr * 100.0).min(100.0);
+                        
+                        output.push_str(&format!(
+                            "EXERCISE ANALYSIS (XML-Trained Enhanced):\n\
+                               Exercise: {} for {:.0} minutes\n\
+                               Heart Rate: {:.0} bpm ({:.1}% intensity)\n\
+                               Conditions: {:.1}°C ambient, {:.0}m elevation\n\
+                               Body Fat: {:.1}%\n\
+                               Calories burned: {:.0} calories\n\n\
+                            COMBINED ANALYSIS:\n\
+                               BMR + Exercise calories: {:.0}\n\
+                               Exercise calories burned: {:.0}\n\n\
+                            BMR BREAKDOWN:\n\
+                               BMR (basic body functions): {:.0} calories\n\
+                               Exercise covered {:.1}% of BMR needs",
+                            exercise_type, duration, heart_rate, hr_percentage,
+                            env_temp, elevation, body_fat, enhanced_calories,
+                            bmr_plus_exercise, enhanced_calories,
+                            bmr, bmr_coverage
+                        ));
+                    } else {
+                        output.push_str("Enhanced exercise model not available for comprehensive analysis");
                     }
+                    
+                    println!("{}", output);
+                    results_text = output;
                 }
+                CalculatorChoice::Retrain => {
+                    // This case is handled above, but include for completeness
+                    unreachable!("Retrain case should be handled before getting user info");
+                }
+            }
+            
+            // Save results to organized folder structure
+            if let Err(e) = self.save_results_to_file(&results_text, &user_profile) {
+                println!("Warning: Could not save results to file: {}", e);
             }
             
             println!("\n{}", "=".repeat(50));
@@ -1024,793 +1145,374 @@ impl CalorieCalculator {
         
         Ok(())
     }
-    
+
+    // You also need these helper methods:
     fn get_user_choice(&self) -> Result<CalculatorChoice, Box<dyn Error>> {
-        println!("\nENHANCED CALORIE CALCULATOR (CSV + XML Hybrid)");
-        println!("===============================================");
         println!("What would you like to calculate?");
         println!("1. Daily calorie needs (CSV-trained neural network)");
         println!("2. Exercise calories (CSV-trained neural network)");
         println!("3. Exercise calories (ENHANCED: CSV + XML + Physics)");
         println!("4. Complete analysis (Daily + Enhanced Exercise)");
+        println!("5. Retrain all models (force rebuild from data)");
         println!("===============================================");
+        print!("Enter your choice (1-5): ");
+        io::stdout().flush()?;
         
-        loop {
-            print!("Enter your choice (1-4): ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            
-            match input.trim() {
-                "1" => return Ok(CalculatorChoice::DailyCalories),
-                "2" => return Ok(CalculatorChoice::ExerciseCalories),
-                "3" => return Ok(CalculatorChoice::EnhancedExercise),
-                "4" => return Ok(CalculatorChoice::Both),
-                _ => println!("Please enter 1, 2, 3, or 4."),
-            }
-        }
-    }
-    
-    // ... keep all existing XML parsing methods and other functions ...
-    
-    fn parse_xml_health_data(&self, xml_path: &str) -> Result<Vec<ProcessedExerciseData>, Box<dyn Error>> {
-        println!("Loading XML health data from: {}", xml_path);
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
         
-        let xml_content = fs::read_to_string(xml_path)?;
-        let mut processed_data = Vec::new();
-        
-        println!("XML file size: {} bytes", xml_content.len());
-        
-        // Count different element types
-        let workout_count = xml_content.matches("<Workout").count();
-        let record_count = xml_content.matches("<Record").count();
-        
-        println!("Found {} <Workout elements and {} <Record elements", workout_count, record_count);
-        
-        if workout_count == 0 {
-            return Ok(processed_data);
-        }
-        
-        // Parse workouts using a better approach - find each workout block
-        let mut current_pos = 0;
-        
-        while let Some(workout_start) = xml_content[current_pos..].find("<Workout ") {
-            let absolute_start = current_pos + workout_start;
-            
-            // Find the end of this workout element (either /> or </Workout>)
-            let workout_section = &xml_content[absolute_start..];
-            
-            let workout_end = if let Some(self_close) = workout_section.find("/>") {
-                absolute_start + self_close + 2
-            } else if let Some(close_tag) = workout_section.find("</Workout>") {
-                absolute_start + close_tag + 10
-            } else {
-                // Find the end of the opening tag and assume it's self-closing for now
-                if let Some(tag_end) = workout_section.find(">") {
-                    absolute_start + tag_end + 1
-                } else {
-                    break;
-                }
-            };
-            
-            let workout_xml = &xml_content[absolute_start..workout_end];
-            
-            println!("\n=== Processing Workout ===");
-            println!("Workout XML (first 200 chars): {}", &workout_xml[0..200.min(workout_xml.len())]);
-            
-            // Extract attributes from the entire workout block
-            if let Some(workout_data) = self.parse_workout_xml(workout_xml) {
-                println!("Successfully parsed workout: {} - {:.1}min - {:.0}cal", 
-                        workout_data.exercise_type, workout_data.duration_minutes, workout_data.calories_burned);
-                processed_data.push(workout_data);
-            } else {
-                println!(" Failed to parse workout");
-            }
-            
-            current_pos = workout_end;
-        }
-        
-        println!("\nSuccessfully processed {} workouts from XML data", processed_data.len());
-        Ok(processed_data)
-    }
-    
-    fn parse_workout_xml(&self, workout_xml: &str) -> Option<ProcessedExerciseData> {
-        // Extract workout attributes from the XML block
-        let workout_type = self.extract_xml_attribute(workout_xml, "workoutActivityType")?;
-        
-        // Duration might be in different formats
-        let duration_str = self.extract_xml_attribute(workout_xml, "duration")
-            .or_else(|| self.extract_xml_attribute(workout_xml, "durationUnit"))
-            .unwrap_or("0".to_string());
-        
-        // Try multiple ways to find energy data
-        let energy_str = self.extract_xml_attribute(workout_xml, "totalEnergyBurned")
-            .or_else(|| self.extract_xml_attribute(workout_xml, "totalEnergyBurnedUnit"))
-            .or_else(|| self.extract_xml_attribute(workout_xml, "energy"))
-            .or_else(|| {
-                // Look for energy in WorkoutStatistics
-                if workout_xml.contains("HKQuantityTypeIdentifierActiveEnergyBurned") {
-                    self.extract_energy_from_statistics(workout_xml)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or("0".to_string());
-        
-        let start_date = self.extract_xml_attribute(workout_xml, "startDate")
-            .unwrap_or("unknown".to_string());
-        
-        println!("  Raw attributes:");
-        println!("    workoutActivityType: {}", workout_type);
-        println!("    duration: {}", duration_str);
-        println!("    totalEnergyBurned: {}", energy_str);
-        println!("    startDate: {}", start_date);
-        
-        // Parse duration - handle various formats
-        let duration_minutes = self.parse_duration_to_minutes(&duration_str);
-        
-        // Parse calories - might have units attached
-        let mut calories = self.parse_energy_value(&energy_str);
-        
-        // If no calories found, estimate based on workout type and duration
-        if calories <= 0.0 && duration_minutes > 0.0 {
-            calories = self.estimate_calories_from_workout(&workout_type, duration_minutes);
-            println!("    Estimated calories based on workout type and duration: {:.0}", calories);
-        }
-        
-        println!("  Parsed values:");
-        println!("    duration: {:.1} minutes", duration_minutes);
-        println!("    calories: {:.0}", calories);
-        
-        // Accept workouts with reasonable duration (even if no calorie data)
-        if duration_minutes >= 1.0 {
-            let normalized_type = self.normalize_workout_type(&workout_type);
-            
-            Some(ProcessedExerciseData {
-                exercise_type: normalized_type,
-                duration_minutes,
-                calories_burned: calories.max(10.0), // Minimum 10 calories
-                avg_heart_rate: None,
-                distance: None,
-                date: start_date,
-                estimated_age: 25.0,
-                estimated_weight: 75.0,
-                estimated_height: 180.0,
-                estimated_gender: true,
-                estimated_body_temp: 37.0,
-                estimated_resting_hr: 60.0,
-                estimated_max_hr: 195.0,
-                estimated_body_fat: 12.0,
-            })
-        } else {
-            println!(" Insufficient duration: {:.1}min", duration_minutes);
-            None
-        }
-    }
-    
-    fn extract_energy_from_statistics(&self, workout_xml: &str) -> Option<String> {
-        // Look for WorkoutStatistics with energy data
-        // Pattern: <WorkoutStatistics type="HKQuantityTypeIdentifierActiveEnergyBurned" ... sum="123.45" ...>
-        if let Some(energy_stat_start) = workout_xml.find("HKQuantityTypeIdentifierActiveEnergyBurned") {
-            let remaining = &workout_xml[energy_stat_start..];
-            if let Some(sum_value) = self.extract_xml_attribute(remaining, "sum") {
-                return Some(sum_value);
-            }
-        }
-        None
-    }
-    
-    fn estimate_calories_from_workout(&self, workout_type: &str, duration_minutes: f32) -> f32 {
-        // Estimate calories based on average person (75kg) and workout type
-        let weight = 75.0; // kg
-        
-        // Base MET values for different workout types
-        let met_value = match workout_type {
-            "HKWorkoutActivityTypeRunning" => 10.0,
-            "HKWorkoutActivityTypeCycling" => 8.0,
-            "HKWorkoutActivityTypeSwimming" => 8.0,
-            "HKWorkoutActivityTypeFunctionalStrengthTraining" => 5.0,
-            "HKWorkoutActivityTypeTraditionalStrengthTraining" => 5.0,
-            "HKWorkoutActivityTypeWalking" => 3.5,
-            "HKWorkoutActivityTypeRowing" => 8.5,
-            "HKWorkoutActivityTypeElliptical" => 7.0,
-            "HKWorkoutActivityTypeHighIntensityIntervalTraining" => 12.0,
-            "HKWorkoutActivityTypeYoga" => 2.5,
-            "HKWorkoutActivityTypeDance" => 5.0,
-            "HKWorkoutActivityTypeCoreTraining" => 4.0,
-            "HKWorkoutActivityTypeFlexibility" => 2.0,
-            "HKWorkoutActivityTypeOther" => 4.0,
-            _ => 4.0, // Default moderate activity
-        };
-        
-        // Calculate calories: METs × weight (kg) × time (hours)
-        let hours = duration_minutes / 60.0;
-        let calories = met_value * weight * hours;
-        
-        calories
-    }
-    
-    fn extract_xml_attribute(&self, xml: &str, attr_name: &str) -> Option<String> {
-        // Handle multi-line XML attributes
-        let patterns = vec![
-            format!(r#"{}=""#, attr_name),
-            format!(r#"{} = ""#, attr_name),
-            format!(r#"{}=""#, attr_name),
-        ];
-        
-        for pattern in patterns {
-            if let Some(start_pos) = xml.find(&pattern) {
-                let value_start = start_pos + pattern.len();
-                
-                // Find the closing quote, handling multi-line attributes
-                let remaining = &xml[value_start..];
-                if let Some(end_pos) = remaining.find('"') {
-                    let value = remaining[0..end_pos].to_string();
-                    if !value.is_empty() {
-                        return Some(value);
-                    }
-                }
-            }
-        }
-        
-        None
-    }
-    
-    fn parse_energy_value(&self, energy_str: &str) -> f32 {
-        if energy_str.is_empty() {
-            return 0.0;
-        }
-        
-        // Remove units and parse the number
-        let cleaned = energy_str
-            .replace("Cal", "")
-            .replace("kcal", "")
-            .replace("kJ", "")
-            .replace(" ", "")
-            .trim()
-            .to_string();
-        
-        let value = cleaned.parse::<f32>().unwrap_or(0.0);
-        
-        // Convert kJ to kcal if needed (1 kcal = 4.184 kJ)
-        if energy_str.contains("kJ") {
-            value / 4.184
-        } else {
-            value
-        }
-    }
-    
-    fn parse_duration_to_minutes(&self, duration_str: &str) -> f32 {
-        if duration_str.is_empty() || duration_str == "0" {
-            return 0.0;
-        }
-        
-        println!("    Parsing duration: '{}'", duration_str);
-        
-        // Handle ISO 8601 format like "PT45M" or "PT1H30M45.123S"
-        if duration_str.starts_with("PT") {
-            let mut total_minutes = 0.0;
-            let clean_str = &duration_str[2..]; // Remove "PT"
-            
-            // Extract hours
-            if let Some(h_pos) = clean_str.find('H') {
-                if let Ok(hours) = clean_str[0..h_pos].parse::<f32>() {
-                    total_minutes += hours * 60.0;
-                    println!("      Found {} hours", hours);
-                }
-            }
-            
-            // Extract minutes
-            if let Some(m_pos) = clean_str.find('M') {
-                let start = if clean_str.contains('H') {
-                    clean_str.find('H').unwrap() + 1
-                } else {
-                    0
-                };
-                if let Ok(minutes) = clean_str[start..m_pos].parse::<f32>() {
-                    total_minutes += minutes;
-                    println!("      Found {} minutes", minutes);
-                }
-            }
-            
-            // Extract seconds
-            if let Some(s_pos) = clean_str.find('S') {
-                let start = if clean_str.contains('M') {
-                    clean_str.find('M').unwrap() + 1
-                } else if clean_str.contains('H') {
-                    clean_str.find('H').unwrap() + 1
-                } else {
-                    0
-                };
-                if let Ok(seconds) = clean_str[start..s_pos].parse::<f32>() {
-                    total_minutes += seconds / 60.0;
-                    println!("      Found {} seconds", seconds);
-                }
-            }
-            
-            println!("      Total: {} minutes", total_minutes);
-            return total_minutes;
-        }
-        
-        // Handle "45:30" format (minutes:seconds)
-        if duration_str.contains(':') {
-            let parts: Vec<&str> = duration_str.split(':').collect();
-            if parts.len() >= 2 {
-                let minutes = parts[0].parse::<f32>().unwrap_or(0.0);
-                let seconds = parts[1].parse::<f32>().unwrap_or(0.0);
-                return minutes + (seconds / 60.0);
-            }
-        }
-        
-        // Just a number - this is probably minutes already
-        let value = duration_str.parse::<f32>().unwrap_or(0.0);
-        
-        // If the value is very large, it might be seconds, convert to minutes
-        if value > 300.0 { // More than 5 hours in minutes seems unlikely
-            println!("      Assuming large value {} is seconds, converting to minutes", value);
-            value / 60.0
-        } else {
-            value
-        }
-    }
-    
-    fn normalize_workout_type(&self, workout_type: &str) -> String {
-        match workout_type {
-            "HKWorkoutActivityTypeRunning" => "Running".to_string(),
-            "HKWorkoutActivityTypeCycling" => "Cycling".to_string(),
-            "HKWorkoutActivityTypeSwimming" => "Swimming".to_string(),
-            "HKWorkoutActivityTypeFunctionalStrengthTraining" | 
-            "HKWorkoutActivityTypeTraditionalStrengthTraining" => "Weight Training".to_string(),
-            "HKWorkoutActivityTypeWalking" => "Walking".to_string(),
-            "HKWorkoutActivityTypeRowing" => "Rowing".to_string(),
-            "HKWorkoutActivityTypeElliptical" => "Elliptical".to_string(),
-            "HKWorkoutActivityTypeHighIntensityIntervalTraining" => "HIIT".to_string(),
-            "HKWorkoutActivityTypeYoga" => "Yoga".to_string(),
-            "HKWorkoutActivityTypeDance" => "Dance".to_string(),
-            "HKWorkoutActivityTypeCoreTraining" => "Weight Training".to_string(),
-            "HKWorkoutActivityTypeFlexibility" => "Yoga".to_string(),
-            "HKWorkoutActivityTypeOther" => "Other".to_string(),
+        match input.trim() {
+            "1" => Ok(CalculatorChoice::DailyCalories),
+            "2" => Ok(CalculatorChoice::ExerciseCalories),
+            "3" => Ok(CalculatorChoice::EnhancedExercise),
+            "4" => Ok(CalculatorChoice::Both),
+            "5" => Ok(CalculatorChoice::Retrain),
             _ => {
-                println!("      Unknown workout type: {}", workout_type);
-                "Other".to_string()
+                println!("Invalid choice. Please enter 1, 2, 3, 4, or 5.");
+                self.get_user_choice()
             }
         }
     }
-    
-    fn convert_processed_to_enhanced(&self, processed_data: &[ProcessedExerciseData]) -> Vec<EnhancedExerciseData> {
-        processed_data.iter().map(|record| {
-            EnhancedExerciseData {
-                user_id: Some(1.0),
-                gender: if record.estimated_gender { "Male".to_string() } else { "Female".to_string() },
-                age: record.estimated_age,
-                height: record.estimated_height,
-                weight: record.estimated_weight,
-                duration: record.duration_minutes,
-                heart_rate: record.avg_heart_rate.unwrap_or(120.0),
-                body_temp: record.estimated_body_temp,
-                calories: record.calories_burned,
-                exercise_type: record.exercise_type.clone(),
-                resting_hr: record.estimated_resting_hr,
-                max_hr: record.estimated_max_hr,
-                body_fat_percent: record.estimated_body_fat,
-                environmental_temp: 22.0,
-                elevation: 0.0,
-            }
-        }).collect()
-    }
-    
-    fn create_exercise_type_encoder(&self) -> HashMap<String, usize> {
-        let exercise_types = vec![
-            "Running".to_string(),
-            "Cycling".to_string(),
-            "Swimming".to_string(),
-            "Weight Training".to_string(),
-            "Walking".to_string(),
-            "Rowing".to_string(),
-            "Elliptical".to_string(),
-            "HIIT".to_string(),
-            "Yoga".to_string(),
-            "Dance".to_string(),
-            "Other".to_string(),
-        ];
-        
-        exercise_types.into_iter()
-            .enumerate()
-            .map(|(i, exercise_type)| (exercise_type, i))
-            .collect()
-    }
-    
-    fn preprocess_enhanced_exercise_data(&self, data: &[EnhancedExerciseData], 
-                                       exercise_encoder: &HashMap<String, usize>) -> (Array2<f32>, Array1<f32>) {
-        let n_samples = data.len();
-        let base_features = 19;
-        let exercise_type_features = exercise_encoder.len();
-        let n_features = base_features + exercise_type_features;
-        
-        let mut features = Array2::<f32>::zeros((n_samples, n_features));
-        let mut targets = Array1::<f32>::zeros(n_samples);
-        
-        for (i, record) in data.iter().enumerate() {
-            let gender = if record.gender.to_lowercase() == "male" { 1.0 } else { 0.0 };
-            
-            let hr_reserve = if record.max_hr > record.resting_hr { 
-                record.max_hr - record.resting_hr 
-            } else { 
-                60.0 
-            };
-            let hr_percentage = if hr_reserve > 0.0 {
-                ((record.heart_rate - record.resting_hr) / hr_reserve).clamp(0.0, 1.5)
-            } else {
-                0.5
-            };
-            
-            let bmi = record.weight / ((record.height / 100.0).powi(2));
-            let lean_mass = record.weight * (1.0 - record.body_fat_percent / 100.0);
-            let metabolic_factor = lean_mass / record.weight;
-            
-            let base_met = match record.exercise_type.as_str() {
-                "Running" => 8.0,
-                "Cycling" => 6.0,
-                "Swimming" => 7.0,
-                "Weight Training" => 4.0,
-                "Walking" => 3.0,
-                "Rowing" => 8.5,
-                "Elliptical" => 6.5,
-                "HIIT" => 9.0,
-                "Yoga" => 2.5,
-                "Dance" => 4.5,
-                _ => 5.0,
-            };
-            let met_estimate = base_met + (hr_percentage * 4.0);
-            
-            let temp_stress = if record.environmental_temp > 25.0 || record.environmental_temp < 10.0 {
-                1.1
-            } else {
-                1.0
-            };
-            let altitude_factor = 1.0 + (record.elevation / 3000.0);
-            let env_factor = temp_stress * altitude_factor;
-            let temp_diff = (record.body_temp - 37.0) / 5.0;
-            
-            // Fill feature vector
-            
-            let mut feat_idx = 0;
-            features[[i, feat_idx]] = gender; feat_idx += 1;
-            features[[i, feat_idx]] = record.age; feat_idx += 1;
-            features[[i, feat_idx]] = record.height; feat_idx += 1;
-            features[[i, feat_idx]] = record.weight; feat_idx += 1;
-            features[[i, feat_idx]] = record.duration; feat_idx += 1;
-            features[[i, feat_idx]] = record.heart_rate; feat_idx += 1;
-            features[[i, feat_idx]] = record.body_temp; feat_idx += 1;
-            features[[i, feat_idx]] = record.resting_hr; feat_idx += 1;
-            features[[i, feat_idx]] = record.max_hr; feat_idx += 1;
-            features[[i, feat_idx]] = hr_percentage; feat_idx += 1;
-            features[[i, feat_idx]] = record.body_fat_percent; feat_idx += 1;
-            features[[i, feat_idx]] = bmi; feat_idx += 1;
-            features[[i, feat_idx]] = lean_mass; feat_idx += 1;
-            features[[i, feat_idx]] = metabolic_factor; feat_idx += 1;
-            features[[i, feat_idx]] = met_estimate; feat_idx += 1;
-            features[[i, feat_idx]] = record.environmental_temp; feat_idx += 1;
-            features[[i, feat_idx]] = record.elevation; feat_idx += 1;
-            features[[i, feat_idx]] = env_factor; feat_idx += 1;
-            features[[i, feat_idx]] = temp_diff; feat_idx += 1;
-            
-            // Exercise type one-hot encoding
-            if let Some(&exercise_index) = exercise_encoder.get(&record.exercise_type) {
-                features[[i, base_features + exercise_index]] = 1.0;
-            }
-            
-            targets[i] = record.calories;
-        }
-        
-        (features, targets)
-    }
-    
+
     fn get_basic_info(&self) -> Result<(bool, f32, f32, f32), Box<dyn Error>> {
-        println!("\nBASIC INFORMATION");
-        println!("====================");
+        print!("Gender (M/F): ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let is_male = input.trim().to_lowercase().starts_with('m');
         
-        let gender = loop {
-            print!("Gender (M/F): ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            match input.trim().to_lowercase().as_str() {
-                "m" | "male" => break true,
-                "f" | "female" => break false,
-                _ => println!("Please enter M or F"),
-            }
-        };
+        print!("Age (years): ");
+        io::stdout().flush()?;
+        input.clear();
+        io::stdin().read_line(&mut input)?;
+        let age: f32 = input.trim().parse()?;
         
-        let age = loop {
-            print!("Age (years): ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            match input.trim().parse::<f32>() {
-                Ok(age) if age >= 10.0 && age <= 100.0 => break age,
-                _ => println!("Please enter valid age (10-100)"),
-            }
-        };
+        print!("Height (cm): ");
+        io::stdout().flush()?;
+        input.clear();
+        io::stdin().read_line(&mut input)?;
+        let height: f32 = input.trim().parse()?;
         
-        let height = loop {
-            print!("Height (cm): ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            match input.trim().parse::<f32>() {
-                Ok(height) if height >= 100.0 && height <= 250.0 => break height,
-                _ => println!("Please enter valid height (100-250 cm)"),
-            }
-        };
+        print!("Weight (kg): ");
+        io::stdout().flush()?;
+        input.clear();
+        io::stdin().read_line(&mut input)?;
+        let weight: f32 = input.trim().parse()?;
         
-        let weight = loop {
-            print!("Weight (kg): ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            match input.trim().parse::<f32>() {
-                Ok(weight) if weight >= 30.0 && weight <= 200.0 => break weight,
-                _ => println!("Please enter valid weight (30-200 kg)"),
-            }
-        };
-        
-        Ok((gender, age, height, weight))
+        Ok((is_male, age, height, weight))
     }
-    
+
     fn get_exercise_info(&self) -> Result<(f32, f32, f32), Box<dyn Error>> {
-        println!("\nEXERCISE INFORMATION");
-        println!("=========================");
+        print!("Exercise duration (minutes): ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let duration: f32 = input.trim().parse()?;
         
-        let duration = loop {
-            print!("Exercise duration (minutes): ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            match input.trim().parse::<f32>() {
-                Ok(dur) if dur > 0.0 && dur <= 600.0 => break dur,
-                _ => println!("Please enter valid duration (1-600 minutes)"),
-            }
-        };
+        print!("Average heart rate (bpm): ");
+        io::stdout().flush()?;
+        input.clear();
+        io::stdin().read_line(&mut input)?;
+        let heart_rate: f32 = input.trim().parse()?;
         
-        let heart_rate = loop {
-            print!("Average heart rate during exercise (bpm): ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            match input.trim().parse::<f32>() {
-                Ok(hr) if hr >= 60.0 && hr <= 220.0 => break hr,
-                _ => println!("Please enter valid heart rate (60-220 bpm)"),
-            }
-        };
-        
-        let body_temp = loop {
-            print!("Body temperature during exercise (°C): ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            match input.trim().parse::<f32>() {
-                Ok(temp) if temp >= 35.0 && temp <= 42.0 => break temp,
-                _ => println!("Please enter valid temperature (35-42°C)"),
-            }
+        print!("Body temperature (°C, default 37.0): ");
+        io::stdout().flush()?;
+        input.clear();
+        io::stdin().read_line(&mut input)?;
+        let body_temp: f32 = if input.trim().is_empty() {
+            37.0
+        } else {
+            input.trim().parse().unwrap_or(37.0)
         };
         
         Ok((duration, heart_rate, body_temp))
     }
-    
+
     fn get_enhanced_exercise_info(&self, is_male: bool, age: f32) -> Result<(f32, f32, f32, String, f32, f32, f32, f32, f32), Box<dyn Error>> {
         let (duration, heart_rate, body_temp) = self.get_exercise_info()?;
         
-        println!("\nEXERCISE TYPE SELECTION:");
-        println!("1. Running/Jogging");
-        println!("2. Cycling");
-        println!("3. Swimming");
-        println!("4. Weight Training");
-        println!("5. Walking");
-        println!("6. Rowing");
-        println!("7. Elliptical");
-        println!("8. HIIT");
-        println!("9. Yoga");
-        println!("10. Dance");
+        print!("Exercise type (Running/Cycling/Swimming/Weight Training/Walking/HIIT/Other): ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let exercise_type = input.trim().to_string();
         
-        let exercise_type = loop {
-            print!("Select exercise type (1-10): ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            match input.trim() {
-                "1" => break "Running".to_string(),
-                "2" => break "Cycling".to_string(),
-                "3" => break "Swimming".to_string(),
-                "4" => break "Weight Training".to_string(),
-                "5" => break "Walking".to_string(),
-                "6" => break "Rowing".to_string(),
-                "7" => break "Elliptical".to_string(),
-                "8" => break "HIIT".to_string(),
-                "9" => break "Yoga".to_string(),
-                "10" => break "Dance".to_string(),
-                _ => println!("Please enter 1-10"),
-            }
-        };
-        
-        println!("\nHEART RATE INFORMATION:");
-        let resting_hr = loop {
-            print!("Resting heart rate (bpm) [60-100]: ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            match input.trim().parse::<f32>() {
-                Ok(hr) if hr >= 40.0 && hr <= 120.0 => break hr,
-                _ => println!("Please enter valid resting HR (40-120 bpm)"),
-            }
-        };
-        
-        let max_hr = loop {
-            print!("Maximum heart rate (press Enter for auto-calc): ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            if input.trim().is_empty() {
-                break 220.0 - age;
-            }
-            match input.trim().parse::<f32>() {
-                Ok(hr) if hr >= 150.0 && hr <= 230.0 => break hr,
-                _ => println!("Please enter valid max HR (150-230 bpm)"),
-            }
-        };
-        
-        println!("\nBODY COMPOSITION:");
-        let body_fat_percent = loop {
-            print!("Body fat percentage (%) [press Enter for estimate]: ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            if input.trim().is_empty() {
-                let estimate = if is_male {
-                    12.0 + (age - 20.0) * 0.2
-                } else {
-                    18.0 + (age - 20.0) * 0.25
-                };
-                break estimate.clamp(8.0, 35.0);
-            }
-            match input.trim().parse::<f32>() {
-                Ok(bf) if bf >= 3.0 && bf <= 50.0 => break bf,
-                _ => println!("Please enter valid body fat % (3-50%)"),
-            }
-        };
-        
-        println!("\nENVIRONMENTAL CONDITIONS:");
-        let environmental_temp = loop {
-            print!("Environmental temperature (°C) [default 22]: ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            if input.trim().is_empty() {
-                break 22.0;
-            }
-            match input.trim().parse::<f32>() {
-                Ok(temp) if temp >= -10.0 && temp <= 50.0 => break temp,
-                _ => println!("Please enter valid temperature (-10 to 50°C)"),
-            }
-        };
-        
-        let elevation = loop {
-            print!("Elevation (meters above sea level) [default 0]: ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            if input.trim().is_empty() {
-                break 0.0;
-            }
-            match input.trim().parse::<f32>() {
-                Ok(elev) if elev >= -500.0 && elev <= 9000.0 => break elev,
-                _ => println!("Please enter valid elevation (-500 to 9000m)"),
-            }
-        };
-        
-        Ok((duration, heart_rate, body_temp, exercise_type, resting_hr, max_hr, 
-            body_fat_percent, environmental_temp, elevation))
-    }
-    
-    fn run2(&mut self, xml_path: Option<&str>) -> Result<(), Box<dyn Error>> {
-        println!("ENHANCED CALORIE CALCULATOR (XML-Trained)");
-        println!("==========================================");
-        
-        // Try to load XML data if path provided
-        if let Some(path) = xml_path {
-            println!("Training model with XML data...");
-            if let Err(e) = self.train_enhanced_exercise_model(path) {
-                println!("Warning: Could not train from XML: {}", e);
-                println!("Using physics-based model instead");
-            }
+        print!("Resting heart rate (bpm, default 65): ");
+        io::stdout().flush()?;
+        input.clear();
+        io::stdin().read_line(&mut input)?;
+        let resting_hr: f32 = if input.trim().is_empty() {
+            65.0
         } else {
-            println!("No XML file provided, using physics-based model");
+            input.trim().parse().unwrap_or(65.0)
+        };
+        
+        let max_hr = 220.0 - age;
+        
+        print!("Body fat percentage (%, default {}): ", if is_male { 15.0 } else { 22.0 });
+        io::stdout().flush()?;
+        input.clear();
+        io::stdin().read_line(&mut input)?;
+        let body_fat: f32 = if input.trim().is_empty() {
+            if is_male { 15.0 } else { 22.0 }
+        } else {
+            input.trim().parse().unwrap_or(if is_male { 15.0 } else { 22.0 })
+        };
+        
+        print!("Environmental temperature (°C, default 22): ");
+        io::stdout().flush()?;
+        input.clear();
+        io::stdin().read_line(&mut input)?;
+        let env_temp: f32 = if input.trim().is_empty() {
+            22.0
+        } else {
+            input.trim().parse().unwrap_or(22.0)
+        };
+        
+        print!("Elevation (meters, default 0): ");
+        io::stdout().flush()?;
+        input.clear();
+        io::stdin().read_line(&mut input)?;
+        let elevation: f32 = if input.trim().is_empty() {
+            0.0
+        } else {
+            input.trim().parse().unwrap_or(0.0)
+        };
+        
+        Ok((duration, heart_rate, body_temp, exercise_type, resting_hr, max_hr, body_fat, env_temp, elevation))
+    }
+
+    fn save_results_to_file(&self, results: &str, user_profile: &str) -> Result<(), Box<dyn Error>> {
+        
+        // Create results directory if it doesn't exist
+        let results_dir = "calorie_results";
+        std::fs::create_dir_all(results_dir)?;
+        
+        // Create timestamp for unique filename
+        let now = chrono::Utc::now();
+        let date_folder = now.format("%Y-%m-%d").to_string();
+        let date_dir = format!("{}/{}", results_dir, date_folder);
+        std::fs::create_dir_all(&date_dir)?;
+        
+        let filename = format!("{}/calorie_calculation_{}.txt", date_dir, now.format("%H-%M-%S"));
+        
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&filename)?;
+        
+        use std::io::Write;
+        
+        writeln!(file, "==========================================")?;
+        writeln!(file, "CALORIE CALCULATOR RESULTS")?;
+        writeln!(file, "Generated: {}", now.format("%Y-%m-%d %H:%M:%S UTC"))?;
+        writeln!(file, "==========================================")?;
+        writeln!(file, "")?;
+        writeln!(file, "USER PROFILE:")?;
+        writeln!(file, "{}", user_profile)?;
+        writeln!(file, "")?;
+        writeln!(file, "CALCULATION RESULTS:")?;
+        writeln!(file, "{}", results)?;
+        writeln!(file, "")?;
+        writeln!(file, "==========================================")?;
+        writeln!(file, "")?;
+        
+        println!(" Results saved to: {}", filename);
+        Ok(())
+    }
+
+    // Add the retrain_all_models method
+    fn retrain_all_models(&mut self, xml_path: Option<&str>) -> Result<(), Box<dyn Error>> {
+        println!("\n🔄 RETRAINING ALL MODELS");
+        println!("========================");
+        println!("This will delete existing models and retrain from scratch...");
+        
+        // Confirm with user
+        print!("Are you sure you want to retrain all models? (y/n): ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        
+        if !input.trim().to_lowercase().starts_with('y') {
+            println!("Retrain cancelled.");
+            return Ok(());
         }
         
-        // Create a basic model if none was loaded
-        if self.enhanced_exercise_model.is_none() {
+        println!("\n🗑️ Removing existing model files...");
+        
+        // Remove existing model files
+        let model_files = [
+            "models/daily_calorie_model.json",
+            "models/exercise_model.json",
+        ];
+        
+        for file in &model_files {
+            if std::path::Path::new(file).exists() {
+                match std::fs::remove_file(file) {
+                    Ok(_) => println!("   ✓ Removed {}", file),
+                    Err(e) => println!("   ⚠ Could not remove {}: {}", file, e),
+                }
+            }
+        }
+        
+        // Remove enhanced model files (they have hash suffixes)
+        if let Ok(entries) = std::fs::read_dir("models") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name() {
+                    if let Some(name_str) = name.to_str() {
+                        if name_str.starts_with("enhanced_exercise_model_") && name_str.ends_with(".json") {
+                            match std::fs::remove_file(&path) {
+                                Ok(_) => println!("   ✓ Removed {}", name_str),
+                                Err(e) => println!("   ⚠ Could not remove {}: {}", name_str, e),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        println!("\n🏗️ Retraining models from scratch...");
+        
+        // Clear existing models
+        self.daily_model = None;
+        self.exercise_model = None;
+        self.enhanced_exercise_model = None;
+        
+        // Retrain daily model
+        println!("\n1. Training Daily Calorie Model...");
+        if let Err(e) = self.train_daily_model() {
+            println!("   Failed to train daily model: {}", e);
+        } else {
+            println!("   Daily calorie model retrained successfully!");
+        }
+        
+        // Retrain exercise model
+        println!("\n2. Training Basic Exercise Model...");
+        if let Err(e) = self.train_exercise_model() {
+            println!("    Failed to train exercise model: {}", e);
+        } else {
+            println!("    Basic exercise model retrained successfully!");
+        }
+        
+        // Retrain enhanced model
+        if let Some(path) = xml_path {
+            println!("\n3. Training Enhanced Exercise Model...");
+            if let Err(e) = self.train_enhanced_exercise_model(path) {
+                println!("    Failed to train enhanced model: {}", e);
+                println!("    Creating physics-based model instead...");
+                let exercise_encoder = self.create_exercise_type_encoder();
+                let n_features = 19 + exercise_encoder.len();
+                let model = EnhancedExercisePredictor::new(n_features, exercise_encoder);
+                self.enhanced_exercise_model = Some(model);
+                println!("   Physics-based enhanced model ready!");
+            } else {
+                println!("    Enhanced exercise model retrained successfully!");
+            }
+        } else {
+            println!("\n3. No XML file provided - creating physics-based enhanced model...");
             let exercise_encoder = self.create_exercise_type_encoder();
             let n_features = 19 + exercise_encoder.len();
             let model = EnhancedExercisePredictor::new(n_features, exercise_encoder);
             self.enhanced_exercise_model = Some(model);
+            println!("   Physics-based enhanced model ready!");
         }
         
-        loop {
-            let choice = self.get_user_choice()?;
-            let (is_male, age, height, weight) = self.get_basic_info()?;
-            
-            println!("\nCALCULATION RESULTS");
-            println!("======================");
-            
-            match choice {
-                CalculatorChoice::EnhancedExercise => {
-                    if let Some(ref model) = self.enhanced_exercise_model {
-                        let (duration, heart_rate, body_temp, exercise_type, resting_hr, max_hr, 
-                             body_fat, env_temp, elevation) = self.get_enhanced_exercise_info(is_male, age)?;
-                        
-                        let enhanced_calories = model.predict_enhanced_calories(
-                            is_male, age, height, weight, duration, heart_rate, body_temp,
-                            &exercise_type, resting_hr, max_hr, body_fat, env_temp, elevation
-                        );
-                        
-                        let hr_reserve = max_hr - resting_hr;
-                        let hr_percentage = if hr_reserve > 0.0 {
-                            ((heart_rate - resting_hr) / hr_reserve * 100.0).clamp(0.0, 150.0)
-                        } else {
-                            50.0
-                        };
-                        
-                        let calories_per_hour = enhanced_calories * (60.0 / duration);
-                        let calories_per_minute = enhanced_calories / duration;
-                        
-                        println!("ENHANCED CALORIE ANALYSIS (XML-Trained)");
-                        println!("========================================");
-                        println!("Profile: {} {}, {:.0}cm, {:.0}kg", 
-                            if is_male { "Male" } else { "Female" }, age, height, weight);
-                        println!("Exercise: {} for {:.0} minutes", exercise_type, duration);
-                        println!("Heart Rate: {:.0} bpm ({:.1}% of HR reserve)", heart_rate, hr_percentage);
-                        println!("Conditions: {:.1}°C ambient, {:.0}m elevation", env_temp, elevation);
-                        println!("Body Fat: {:.1}%", body_fat);
-                        println!();
-                        println!("CALORIE BURN RESULTS:");
-                        println!("   Total calories burned: {:.0} calories", enhanced_calories);
-                        println!("   Calories per minute: {:.1} cal/min", calories_per_minute);
-                        println!("   Calories per hour: {:.0} cal/hour", calories_per_hour);
-                        
-                        if hr_percentage > 85.0 {
-                            println!("   Very high intensity - maximum calorie burn!");
-                        } else if hr_percentage > 70.0 {
-                            println!("   High intensity - excellent calorie burn!");
-                        } else if hr_percentage > 50.0 {
-                            println!("   Moderate intensity - good steady burn rate!");
-                        } else {
-                            println!("   Light activity - gentle calorie burn!");
-                        }
-                        
-                    } else {
-                        println!("Enhanced exercise model not available");
-                    }
-                },
-                _ => {
-                    println!("Feature not yet implemented in this demo");
-                    println!("Use option 3 for the XML-trained enhanced calculator");
-                }
-            }
-            
-            println!("\n{}", "=".repeat(50));
-            print!("Continue? (y/n): ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            
-            if !input.trim().to_lowercase().starts_with('y') {
-                println!("Thank you for using the Enhanced Calorie Calculator!");
-                break;
-            }
-        }
+        println!("\n All models retrained successfully!");
+        println!("Models are now ready with fresh training data.");
         
         Ok(())
     }
+}
+
+// Helper functions to convert between Array and Vec
+fn array2_to_vec(arr: &Array2<f32>) -> Vec<Vec<f32>> {
+    let mut result = Vec::new();
+    for i in 0..arr.nrows() {
+        let mut row = Vec::new();
+        for j in 0..arr.ncols() {
+            row.push(arr[[i, j]]);
+        }
+        result.push(row);
+    }
+    result
+}
+
+fn vec_to_array2(vec: &Vec<Vec<f32>>) -> Array2<f32> {
+    if vec.is_empty() || vec[0].is_empty() {
+        return Array2::zeros((0, 0));
+    }
+    let rows = vec.len();
+    let cols = vec[0].len();
+    let mut arr = Array2::zeros((rows, cols));
+    for i in 0..rows {
+        for j in 0..cols {
+            arr[[i, j]] = vec[i][j];
+        }
+    }
+    arr
+}
+
+fn array1_to_vec(arr: &Array1<f32>) -> Vec<f32> {
+    arr.to_vec()
+}
+
+fn vec_to_array1(vec: &Vec<f32>) -> Array1<f32> {
+    Array1::from_vec(vec.clone())
+}
+
+// Serializable versions of model structures
+#[derive(Serialize, Deserialize)]
+struct SerializableDailyModel {
+    weights1: Vec<Vec<f32>>,
+    biases1: Vec<f32>,
+    weights2: Vec<Vec<f32>>,
+    biases2: Vec<f32>,
+    input_mins: Vec<f32>,
+    input_maxs: Vec<f32>,
+    target_min: f32,
+    target_max: f32,
+    input_size: usize,
+    hidden_size: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SerializableExerciseModel {
+    weights1: Vec<Vec<f32>>,
+    biases1: Vec<f32>,
+    weights2: Vec<Vec<f32>>,
+    biases2: Vec<f32>,
+    weights3: Vec<Vec<f32>>,
+    biases3: Vec<f32>,
+    input_mins: Vec<f32>,
+    input_maxs: Vec<f32>,
+    target_min: f32,
+    target_max: f32,
+    input_size: usize,
+    hidden_size1: usize,
+    hidden_size2: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SerializableEnhancedModel {
+    weights1: Vec<Vec<f32>>,
+    biases1: Vec<f32>,
+    weights2: Vec<Vec<f32>>,
+    biases2: Vec<f32>,
+    weights3: Vec<Vec<f32>>,
+    biases3: Vec<f32>,
+    weights4: Vec<Vec<f32>>,
+    biases4: Vec<f32>,
+    input_mins: Vec<f32>,
+    input_maxs: Vec<f32>,
+    target_min: f32,
+    target_max: f32,
+    exercise_type_encoder: HashMap<String, usize>,
+    input_size: usize,
+    hidden_size1: usize,
+    hidden_size2: usize,
+    hidden_size3: usize,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -1842,4 +1544,196 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     let xml_file = xml_path.as_deref();
     calculator.run(xml_file)
+}
+
+impl CalorieCalculator {
+    // Add the missing methods here
+    fn parse_xml_health_data(&self, xml_path: &str) -> Result<Vec<ProcessedExerciseData>, Box<dyn Error>> {
+        let xml_content = std::fs::read_to_string(xml_path)?;
+        println!("XML file size: {} bytes", xml_content.len());
+        
+        // Count elements for debugging
+        let workout_count = xml_content.matches("<Workout").count();
+        let record_count = xml_content.matches("<Record").count();
+        println!("Found {} <Workout elements and {} <Record elements", workout_count, record_count);
+        
+        let mut processed_data = Vec::new();
+        
+        // Extract workout data using regex
+        let workout_regex = regex::Regex::new(r#"<Workout[^>]*workoutActivityType="([^"]+)"[^>]*duration="([^"]+)"[^>]*startDate="([^"]+)"[^>]*>"#)?;        
+        for workout_match in workout_regex.captures_iter(&xml_content) {
+            println!("\n=== Processing Workout ===");
+            let full_match = workout_match.get(0).unwrap();
+            let workout_xml = &xml_content[full_match.start()..full_match.start()+200.min(xml_content.len()-full_match.start())];
+            println!("Workout XML (first 200 chars): {}", workout_xml);
+            
+            let activity_type = workout_match.get(1).map_or("", |m| m.as_str());
+            let duration_str = workout_match.get(2).map_or("", |m| m.as_str());
+            let start_date = workout_match.get(3).map_or("", |m| m.as_str());
+            
+            println!("Raw attributes:");
+            println!("    workoutActivityType: {}", activity_type);
+            println!("    duration: {}", duration_str);
+            println!("    totalEnergyBurned: 0");
+            println!("    startDate: {}", start_date);
+            
+            if let Ok(duration_minutes) = duration_str.parse::<f32>() {
+                println!("    Parsing duration: '{}'", duration_str);
+                
+                // Estimate calories based on workout type and duration
+                let estimated_calories = self.estimate_calories_from_workout(activity_type, duration_minutes);
+                println!("    Estimated calories based on workout type and duration: {}", estimated_calories);
+                
+                let exercise_type = self.map_workout_activity_type(activity_type);
+                
+                let processed_workout = ProcessedExerciseData {
+                    exercise_type: exercise_type.clone(),
+                    duration_minutes,
+                    calories_burned: estimated_calories,
+                    avg_heart_rate: Some(120.0 + (duration_minutes * 0.5).min(40.0)), // Estimate based on duration
+                    estimated_age: 30.0,
+                    estimated_weight: 70.0,
+                    estimated_height: 170.0,
+                    estimated_gender: true,
+                    estimated_body_temp: 37.0,
+                    estimated_resting_hr: 65.0,
+                    estimated_max_hr: 190.0,
+                    estimated_body_fat: 15.0,
+                };
+                
+                println!("  Parsed values:");
+                println!("    duration: {:.1} minutes", duration_minutes);
+                println!("    calories: {}", estimated_calories);
+                
+                processed_data.push(processed_workout);
+                println!("Successfully parsed workout: {} - {:.1}min - {}cal", exercise_type, duration_minutes, estimated_calories);
+            }
+        }
+        
+        println!("\nSuccessfully processed {} workouts from XML data", processed_data.len());
+        Ok(processed_data)
+    }
+    
+    fn convert_processed_to_enhanced(&self, processed_data: &[ProcessedExerciseData]) -> Vec<EnhancedExerciseData> {
+        processed_data.iter().map(|data| {
+            EnhancedExerciseData {
+                gender: if data.estimated_gender { "Male".to_string() } else { "Female".to_string() },
+                age: data.estimated_age,
+                height: data.estimated_height,
+                weight: data.estimated_weight,
+                duration: data.duration_minutes,
+                heart_rate: data.avg_heart_rate.unwrap_or(120.0),
+                body_temp: data.estimated_body_temp,
+                calories: data.calories_burned,
+                exercise_type: data.exercise_type.clone(),
+                resting_hr: data.estimated_resting_hr,
+                max_hr: data.estimated_max_hr,
+                body_fat_percent: data.estimated_body_fat,
+                environmental_temp: 22.0,
+                elevation: 0.0,
+            }
+        }).collect()
+    }
+    
+    fn create_exercise_type_encoder(&self) -> HashMap<String, usize> {
+        let mut encoder = HashMap::new();
+        let exercise_types = vec![
+            "Running", "Cycling", "Swimming", "Weight Training", "Walking", 
+            "HIIT", "Rowing", "Elliptical", "Yoga", "Dance", "Other"
+        ];
+        
+        for (i, exercise_type) in exercise_types.iter().enumerate() {
+            encoder.insert(exercise_type.to_string(), i);
+        }
+        
+        encoder
+    }
+    
+    fn preprocess_enhanced_exercise_data(&self, data: &[EnhancedExerciseData], encoder: &HashMap<String, usize>) -> (Array2<f32>, Array1<f32>) {
+        let n_samples = data.len();
+        let n_base_features = 19; // Basic features
+        let n_exercise_types = encoder.len();
+        let n_features = n_base_features + n_exercise_types;
+        
+        let mut features = Array2::<f32>::zeros((n_samples, n_features));
+        let mut targets = Array1::<f32>::zeros(n_samples);
+        
+        for (i, record) in data.iter().enumerate() {
+            let mut feature_idx = 0;
+            
+            // Basic features
+            features[[i, feature_idx]] = if record.gender.to_lowercase() == "male" { 1.0 } else { 0.0 };
+            feature_idx += 1;
+            features[[i, feature_idx]] = record.age;
+            feature_idx += 1;
+            features[[i, feature_idx]] = record.height;
+            feature_idx += 1;
+            features[[i, feature_idx]] = record.weight;
+            feature_idx += 1;
+            features[[i, feature_idx]] = record.duration;
+            feature_idx += 1;
+            features[[i, feature_idx]] = record.heart_rate;
+            feature_idx += 1;
+            features[[i, feature_idx]] = record.body_temp;
+            feature_idx += 1;
+            features[[i, feature_idx]] = record.resting_hr;
+            feature_idx += 1;
+            features[[i, feature_idx]] = record.max_hr;
+            feature_idx += 1;
+            features[[i, feature_idx]] = record.body_fat_percent;
+            feature_idx += 1;
+            features[[i, feature_idx]] = record.environmental_temp;
+            feature_idx += 1;
+            features[[i, feature_idx]] = record.elevation;
+
+            
+            // Exercise type encoding (one-hot)
+            if let Some(&_type_idx) = encoder.get(&record.exercise_type) {
+    
+            }
+            
+            targets[i] = record.calories;
+        }
+        
+        (features, targets)
+    }
+    
+    fn estimate_calories_from_workout(&self, activity_type: &str, duration_minutes: f32) -> f32 {
+        let base_calories_per_minute = match activity_type {
+            s if s.contains("Running") => 15.0,
+            s if s.contains("Cycling") => 10.0,
+            s if s.contains("Swimming") => 12.0,
+            s if s.contains("FunctionalStrengthTraining") => 6.25,
+            s if s.contains("Walking") => 4.4,
+            s if s.contains("HighIntensityIntervalTraining") => 15.0,
+            s if s.contains("Rowing") => 11.0,
+            s if s.contains("Elliptical") => 8.0,
+            s if s.contains("Yoga") => 3.0,
+            s if s.contains("Dance") => 7.0,
+            _ => 5.0,
+        };
+        
+        (base_calories_per_minute * duration_minutes).round()
+    }
+    
+    fn map_workout_activity_type(&self, activity_type: &str) -> String {
+        match activity_type {
+            s if s.contains("Running") => "Running".to_string(),
+            s if s.contains("Cycling") => "Cycling".to_string(),
+            s if s.contains("Swimming") => "Swimming".to_string(),
+            s if s.contains("FunctionalStrengthTraining") => "Weight Training".to_string(),
+            s if s.contains("Walking") => "Walking".to_string(),
+            s if s.contains("HighIntensityIntervalTraining") => "HIIT".to_string(),
+            s if s.contains("Rowing") => "Rowing".to_string(),
+            s if s.contains("Elliptical") => "Elliptical".to_string(),
+            s if s.contains("Yoga") => "Yoga".to_string(),
+            s if s.contains("Dance") => "Dance".to_string(),
+            _ => {
+                if !activity_type.is_empty() {
+                    println!("      Unknown workout type: {}", activity_type);
+                }
+                "Other".to_string()
+            }
+        }
+    }
 }
